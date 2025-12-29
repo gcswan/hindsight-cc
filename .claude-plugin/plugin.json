@@ -1,0 +1,10 @@
+{
+  "name": "2020",
+  "version": "1.0.0",
+  "description": "Persistent memory across Claude Code conversations using Hindsight vector database",
+  "author": {
+    "name": "gcswan"
+  },
+  "license": "MIT",
+  "keywords": ["memory", "context", "hindsight", "persistence", "recall"]
+}
