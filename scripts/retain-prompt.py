@@ -6,10 +6,20 @@ import sys
 
 def main():
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    bank_id = "claude-code--" + project_dir.lstrip("/").replace("/", "-").lower() if project_dir else ""
+    bank_id = "claude-code--" + project_dir.lstrip("/").replace("/", "-").lower() if project_dir else "claude-code--default"
 
-    input_data = json.load(sys.stdin)
+    try:
+        input_data = json.load(sys.stdin)
+    except Exception:
+        return
+
     content = input_data.get("prompt", "")
+    if isinstance(content, list):
+        content = "\n".join(
+            part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+    elif not isinstance(content, str):
+        content = str(content)
 
     try:
         from hindsight_client import Hindsight

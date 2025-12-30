@@ -6,9 +6,12 @@ import sys
 
 def main():
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    bank_id = "claude-code--" + project_dir.lstrip("/").replace("/", "-").lower() if project_dir else ""
+    bank_id = "claude-code--" + project_dir.lstrip("/").replace("/", "-").lower() if project_dir else "claude-code--default"
 
-    input_data = json.load(sys.stdin)
+    try:
+        input_data = json.load(sys.stdin)
+    except Exception:
+        return
     transcript_path = input_data.get("transcript_path", "")
 
     if not transcript_path:
@@ -46,6 +49,12 @@ def main():
         inner = msg.get("message", {})
         role = inner.get("role", "unknown")
         content = inner.get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(
+                part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
+            ).strip()
+        elif not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=True)
         lines.append(f"{role}: {content}")
 
     transcript = "\n".join(lines)

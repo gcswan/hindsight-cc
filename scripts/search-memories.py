@@ -10,7 +10,7 @@ def main():
         sys.exit(1)
 
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    bank_id = "claude-code--" + project_dir.lstrip("/").replace("/", "-").lower() if project_dir else ""
+    bank_id = "claude-code--" + project_dir.lstrip("/").replace("/", "-").lower() if project_dir else "claude-code--default"
 
     try:
         from hindsight_client import Hindsight
