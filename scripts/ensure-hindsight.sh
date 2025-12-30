@@ -6,19 +6,33 @@
 CONTAINER_NAME="hindsight-2020"
 HEALTH_URL="http://localhost:8888/health"
 
+# Debug function - only outputs if HINDSIGHT_DEBUG is set
+debug() {
+    if [[ "${HINDSIGHT_DEBUG,,}" =~ ^(1|true|yes)$ ]]; then
+        echo "[2020:ensure-hindsight] $1" >&2
+    fi
+}
+
+debug "Starting"
+
 # Check if Hindsight server is already responding
 if curl -s --connect-timeout 2 "$HEALTH_URL" > /dev/null 2>&1; then
+    debug "Server already running"
     exit 0
 fi
+
+debug "Server not responding, checking container status"
 
 # Check if container exists but is stopped
 CONTAINER_ID=$(docker ps -aq -f "name=$CONTAINER_NAME" 2>/dev/null)
 
 if [ -n "$CONTAINER_ID" ]; then
     # Container exists, try to start it
+    debug "Found existing container $CONTAINER_ID, starting it"
     docker start "$CONTAINER_ID" > /dev/null 2>&1
 else
     # No container, create and start new one
+    debug "No existing container, creating new one"
     mkdir -p ~/hindsight-data
 
     # Get API key from environment
@@ -29,6 +43,7 @@ else
         echo "Hindsight LLM features may not work" >&2
     fi
 
+    debug "Starting new container with image ghcr.io/vectorize-io/hindsight:latest"
     # Start Hindsight container in detached mode
     docker run -d --name "$CONTAINER_NAME" \
         -p 8888:8888 -p 9999:9999 \
@@ -39,12 +54,15 @@ else
 fi
 
 # Wait for server to be ready (up to 30 seconds)
+debug "Waiting for server to be ready (up to 30 seconds)"
 for i in {1..30}; do
     if curl -s --connect-timeout 1 "$HEALTH_URL" > /dev/null 2>&1; then
+        debug "Server ready after $i seconds"
         exit 0
     fi
     sleep 1
 done
 
+debug "Server did not start within 30 seconds"
 echo "Warning: Hindsight server did not start within 30 seconds" >&2
 exit 1

@@ -74,6 +74,7 @@ memory text 2
 |----------|-------------|---------|
 | `HINDSIGHT_API_LLM_API_KEY` | API key for Hindsight LLM operations | (required) |
 | `HINDSIGHT_API_LLM_MODEL` | LLM model for Hindsight | `gpt-4o-mini` |
+| `HINDSIGHT_DEBUG` | Enable debug logging (`1`, `true`, or `yes`) | (disabled) |
 
 ### Data Storage
 
@@ -85,6 +86,26 @@ Memory data is stored in `~/hindsight-data/`.
 - UI: http://localhost:9999
 
 ## Troubleshooting
+
+### Enable debug logging
+
+Set `HINDSIGHT_DEBUG=1` to see detailed output from all plugin operations:
+
+```bash
+export HINDSIGHT_DEBUG=1
+```
+
+Debug messages are prefixed with the script name and written to stderr:
+```
+[2020:ensure-hindsight] Starting
+[2020:ensure-hindsight] Server already running
+[2020:retain-prompt] Starting
+[2020:retain-prompt] Bank ID: claude-code--home-user-myproject
+[2020:retain-prompt] Content length: 42 chars
+[2020:retain-prompt] Successfully retained prompt
+[2020:inject-memories] Found 3 memories
+[2020:inject-memories] Injected memories into prompt
+```
 
 ### Server not starting
 
