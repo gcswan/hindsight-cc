@@ -1,6 +1,6 @@
 # hindsight-cc
 
-![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
+![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Docker Required](https://img.shields.io/badge/docker-required-blue.svg)
 
