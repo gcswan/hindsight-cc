@@ -48,10 +48,12 @@ Once installed, the plugin works automatically:
 Each project gets its own isolated memory bank based on git repository identity (when available) or project path. **The plugin auto-detects the project directory from git root or current working directory - no environment variables needed.**
 
 **Git-based (preferred)**: Extracts owner/repo from git remote origin
+
 - Any clone of `gcswan/hindsight-2020` → `claude-code--gcswan-hindsight-2020`
 - Same memories across all paths: `/home/user/hindsight-2020`, `/mnt/work/hindsight-2020`, etc.
 
 **Path-based (fallback)**: Uses last 2 path components when not in a git repo
+
 - `/home/user/code/myapp` → `claude-code--code-myapp`
 - `/projects/demo` → `claude-code--projects-demo`
 
@@ -81,7 +83,7 @@ memory text 2
 ### Environment Variables
 
 | Variable | Description | Default |
-|----------|-------------|---------|
+| -------- | ----------- | ------- |
 | `HINDSIGHT_API_LLM_API_KEY` | API key for Hindsight LLM operations | (required) |
 | `HINDSIGHT_API_LLM_MODEL` | LLM model for Hindsight | `gpt-4o-mini` |
 | `HINDSIGHT_DEBUG` | Enable debug logging (`1`, `true`, or `yes`) | (disabled) |
@@ -107,7 +109,7 @@ export HINDSIGHT_DEBUG=1
 
 Debug messages are prefixed with the script name and written to stderr:
 
-```
+```text
 [hindsight-2020:ensure-hindsight] Starting
 [hindsight-2020:ensure-hindsight] Server already running
 [hindsight-2020:retain-prompt] Starting
