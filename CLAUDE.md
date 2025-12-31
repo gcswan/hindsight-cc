@@ -9,10 +9,10 @@ This is a Claude Code plugin that provides persistent memory across conversation
 ## Setup and Installation
 
 ```bash
-./setup.sh
+./scripts/install-dependencies.sh
 ```
 
-This creates a Python virtual environment, installs dependencies (hindsight-client), makes scripts executable, and symlinks the plugin to `~/.claude/plugins/hindsight-2020`.
+This creates a Python virtual environment in `scripts/.venv`, installs dependencies (hindsight-client), and makes scripts executable. The script short-circuits if already set up.
 
 **Required environment variable**: `HINDSIGHT_API_LLM_API_KEY` must be set for Hindsight's LLM operations.
 
@@ -22,7 +22,7 @@ This creates a Python virtual environment, installs dependencies (hindsight-clie
 
 The plugin operates through Claude Code hooks defined in `hooks/hooks.json`:
 
-1. **SessionStart**: Runs `scripts/ensure-hindsight.sh` to start the Hindsight Docker container if not already running
+1. **SessionStart**: Runs `scripts/install-dependencies.sh` (installs deps if needed) then `scripts/ensure-hindsight.sh` (starts Docker container)
 2. **UserPromptSubmit**: Sequentially runs:
    - `scripts/retain-prompt.py` - Stores the user's prompt in the memory bank
    - `scripts/inject-memories.py` - Queries for relevant memories and injects them into the prompt
@@ -72,7 +72,7 @@ All scripts follow a pattern of silently failing if Hindsight is unavailable. Se
 - `scripts/search-memories.py` - Manual search utility for testing
 - `scripts/get-status.py` - Status checking utility
 
-All Python scripts are executed via the venv: `${CLAUDE_PLUGIN_ROOT}/.venv/bin/python3`
+All Python scripts are executed via the venv: `${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3`
 
 ### Debug Logging
 

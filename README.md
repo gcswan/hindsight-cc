@@ -18,11 +18,13 @@ A Claude Code plugin that provides persistent memory across conversations using 
 
 ## Installation
 
+Install the plugin via the Claude Marketplace and enable it for your project. Then install dependencies from this repo:
+
 ```bash
-./setup.sh
+./scripts/install-dependencies.sh
 ```
 
-This creates the Python venv, installs dependencies, and symlinks the plugin to `~/.claude/plugins/hindsight-2020`.
+This creates the Python venv under `scripts/.venv` and installs dependencies.
 
 Make sure `HINDSIGHT_API_LLM_API_KEY` is set in your environment.
 

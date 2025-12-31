@@ -10,7 +10,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
-PYTHON="$PLUGIN_DIR/.venv/bin/python3"
+PYTHON="$PLUGIN_DIR/scripts/.venv/bin/python3"
 
 # Colors for output
 RED='\033[0;31m'
