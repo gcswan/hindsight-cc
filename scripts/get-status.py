@@ -2,11 +2,12 @@
 import os
 import subprocess
 import urllib.request
+from bank_utils import get_bank_id, get_project_dir
 
 
 def main():
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    bank_id = "claude-code--" + project_dir.lstrip("/").replace("/", "-").lower() if project_dir else "unknown"
+    project_dir = get_project_dir()
+    bank_id = get_bank_id()
 
     print(f"Project directory: {project_dir}")
     print(f"Memory bank ID: {bank_id}")

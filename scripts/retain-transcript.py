@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+from bank_utils import get_bank_id
 
 DEBUG = os.environ.get("HINDSIGHT_DEBUG", "").lower() in ("1", "true", "yes")
 
@@ -13,8 +14,7 @@ def debug(msg: str) -> None:
 
 def main():
     debug("Starting")
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    bank_id = "claude-code--" + project_dir.lstrip("/").replace("/", "-").lower() if project_dir else "claude-code--default"
+    bank_id = get_bank_id(debug_callback=debug)
     debug(f"Bank ID: {bank_id}")
 
     try:

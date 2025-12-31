@@ -30,11 +30,17 @@ The plugin operates through Claude Code hooks defined in `hooks/hooks.json`:
 
 ### Memory Bank Isolation
 
-Each project gets its own isolated memory bank based on `CLAUDE_PROJECT_DIR`. The bank ID is generated as:
-```
-claude-code--<normalized-project-path>
-```
-Example: `/home/user/projects/myapp` → `claude-code--home-user-projects-myapp`
+Each project gets its own isolated memory bank based on git repository identity (when available) or project path. **The plugin auto-detects the project directory from git root or current working directory - no environment variables needed.**
+
+**Git-based (preferred)**: Extracts owner/repo from git remote origin
+- Any clone of `gcswan/2020` → `claude-code--gcswan-2020`
+- Same memories across all paths: `/home/user/2020`, `/mnt/work/2020`, etc.
+
+**Path-based (fallback)**: Uses last 2 path components when not in a git repo
+- `/home/user/code/myapp` → `claude-code--code-myapp`
+- `/projects/demo` → `claude-code--projects-demo`
+
+This ensures working on the same repository from different paths shares the same memory bank.
 
 ### Hindsight Integration
 
@@ -58,6 +64,7 @@ memory text 2
 
 All scripts follow a pattern of silently failing if Hindsight is unavailable. Set `HINDSIGHT_DEBUG=1` to enable verbose logging to stderr.
 
+- `scripts/bank_utils.py` - Shared utility module for bank ID generation (git-based with path fallback)
 - `scripts/ensure-hindsight.sh` - Checks for and starts Hindsight Docker container
 - `scripts/retain-prompt.py` - Stores user prompts via `client.retain()`
 - `scripts/inject-memories.py` - Queries and injects relevant memories via `client.recall()`

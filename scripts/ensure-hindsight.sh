@@ -44,6 +44,8 @@ else
     fi
 
     debug "Starting new container with image ghcr.io/vectorize-io/hindsight:latest"
+    debug "Starting Hindsight with model: ${HINDSIGHT_API_LLM_MODEL:-gpt-4o-mini}"
+
     # Start Hindsight container in detached mode
     docker run -d --name "$CONTAINER_NAME" \
         -p 8888:8888 -p 9999:9999 \

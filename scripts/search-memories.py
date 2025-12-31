@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+from bank_utils import get_bank_id
 
 
 def main():
@@ -9,8 +10,7 @@ def main():
         print("Usage: search-memories.py <query>")
         sys.exit(1)
 
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    bank_id = "claude-code--" + project_dir.lstrip("/").replace("/", "-").lower() if project_dir else "claude-code--default"
+    bank_id = get_bank_id()
 
     try:
         from hindsight_client import Hindsight

@@ -24,12 +24,24 @@ echo ""
 
 # Export debug mode
 export HINDSIGHT_DEBUG=1
-export CLAUDE_PROJECT_DIR="${CLAUDE_PROJECT_DIR:-/tmp/2020-manual-test}"
 
-BANK_ID="claude-code--$(echo "$CLAUDE_PROJECT_DIR" | sed 's|^/||; s|/|-|g' | tr '[:upper:]' '[:lower:]')"
+# Auto-detect bank ID using bank_utils (no CLAUDE_PROJECT_DIR needed)
+BANK_ID=$("$PYTHON" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_DIR/scripts')
+from bank_utils import get_bank_id, get_project_dir
+print(get_bank_id())
+")
+
+PROJECT_DIR=$("$PYTHON" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_DIR/scripts')
+from bank_utils import get_project_dir
+print(get_project_dir())
+")
 
 echo -e "${YELLOW}Configuration:${NC}"
-echo "  Project Dir: $CLAUDE_PROJECT_DIR"
+echo "  Project Dir: $PROJECT_DIR"
 echo "  Bank ID: $BANK_ID"
 echo ""
 
