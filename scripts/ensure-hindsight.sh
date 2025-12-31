@@ -5,6 +5,7 @@
 
 CONTAINER_NAME="hindsight-cc"
 HEALTH_URL="http://localhost:8888/health"
+HINDSIGHT_IMAGE_DEFAULT="ghcr.io/vectorize-io/hindsight:0.1.16"
 
 # Debug function - only outputs if HINDSIGHT_DEBUG is set
 debug() {
@@ -54,7 +55,8 @@ else
         echo "Hindsight LLM features may not work" >&2
     fi
 
-    debug "Starting new container with image ghcr.io/vectorize-io/hindsight:latest"
+    HINDSIGHT_IMAGE="${HINDSIGHT_IMAGE:-$HINDSIGHT_IMAGE_DEFAULT}"
+    debug "Starting new container with image ${HINDSIGHT_IMAGE}"
     debug "Starting Hindsight with model: ${HINDSIGHT_API_LLM_MODEL:-gpt-4o-mini}"
 
     # Start Hindsight container in detached mode
@@ -63,7 +65,7 @@ else
         -e HINDSIGHT_API_LLM_API_KEY="$API_KEY" \
         -e HINDSIGHT_API_LLM_MODEL="${HINDSIGHT_API_LLM_MODEL:-gpt-4o-mini}" \
         -v "$HOME/hindsight-data:/home/hindsight/.pg0" \
-        ghcr.io/vectorize-io/hindsight:latest > /dev/null 2>&1
+        "$HINDSIGHT_IMAGE" > /dev/null 2>&1
 fi
 
 # Wait for server to be ready (up to 30 seconds)
