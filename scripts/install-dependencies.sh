@@ -1,16 +1,18 @@
-#!/bin/bash
+#!/bin/sh
 
 set -e
 
 # Script works from scripts/ directory where venv lives
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Debug helper - only outputs if HINDSIGHT_DEBUG is set
 debug() {
-    if [[ "${HINDSIGHT_DEBUG:-}" =~ ^(1|true|yes)$ ]]; then
-        echo "[hindsight-cc:install-dependencies] $*" >&2
-    fi
+    case "${HINDSIGHT_DEBUG:-}" in
+        1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])
+            echo "[hindsight-cc:install-dependencies] $*" >&2
+            ;;
+    esac
 }
 
 soft_fail() {
@@ -28,14 +30,17 @@ fi
 debug "Setting up hindsight-cc plugin..."
 
 # Check Python version (requires 3.10+)
-python_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
-if [[ -z "$python_version" ]]; then
+python_version=$(python3 -c "import sys; print('%s.%s' % (sys.version_info[0], sys.version_info[1]))" 2>/dev/null)
+if [ -z "$python_version" ]; then
     soft_fail "python3 not found"
 fi
 
-major=$(echo "$python_version" | cut -d. -f1)
-minor=$(echo "$python_version" | cut -d. -f2)
-if [[ "$major" -lt 3 ]] || [[ "$major" -eq 3 && "$minor" -lt 10 ]]; then
+IFS=.
+set -- $python_version
+IFS=' '
+major=$1
+minor=$2
+if [ "$major" -lt 3 ] || { [ "$major" -eq 3 ] && [ "$minor" -lt 10 ]; }; then
     soft_fail "Python 3.10+ required (found $python_version)"
 fi
 debug "Python version: $python_version"
@@ -59,4 +64,3 @@ fi
 
 # Make scripts executable
 chmod +x *.sh *.py 2>/dev/null || true
-

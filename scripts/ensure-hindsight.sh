@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Ensure Hindsight server is running
 # Called by SessionStart hook to auto-start the server
@@ -9,20 +9,22 @@ HINDSIGHT_IMAGE_DEFAULT="ghcr.io/vectorize-io/hindsight:0.1.16"
 
 # Debug function - only outputs if HINDSIGHT_DEBUG is set
 debug() {
-    if [[ "${HINDSIGHT_DEBUG,,}" =~ ^(1|true|yes)$ ]]; then
-    echo "[hindsight-cc:ensure-hindsight] $1" >&2
-    fi
+    case "${HINDSIGHT_DEBUG:-}" in
+        1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])
+            echo "[hindsight-cc:ensure-hindsight] $1" >&2
+            ;;
+    esac
 }
 
 debug "Starting"
 
 # Check Docker is available
-if ! command -v docker &> /dev/null; then
+if ! command -v docker >/dev/null 2>&1; then
     debug "Docker not found in PATH"
     exit 0
 fi
 
-if ! docker info &> /dev/null 2>&1; then
+if ! docker info >/dev/null 2>&1; then
     debug "Docker daemon not running or not accessible"
     exit 0
 fi
@@ -70,12 +72,14 @@ fi
 
 # Wait for server to be ready (up to 30 seconds)
 debug "Waiting for server to be ready (up to 30 seconds)"
-for i in {1..30}; do
+i=1
+while [ "$i" -le 30 ]; do
     if curl -s --connect-timeout 1 "$HEALTH_URL" > /dev/null 2>&1; then
         debug "Server ready after $i seconds"
         exit 0
     fi
     sleep 1
+    i=$((i + 1))
 done
 
 debug "Server did not start within 30 seconds"
