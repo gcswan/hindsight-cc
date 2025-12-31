@@ -2,7 +2,6 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "hindsight-cc",
   "version": "1.0.0",
-  "description": "Persistent memory for Claude Code using Hindsight vector database",
   "owner": {
     "name": "gcswan",
     "email": "noreply@github.com"
