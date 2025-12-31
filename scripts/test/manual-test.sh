@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Manual Testing Script for 2020 Plugin
+# Manual Testing Script for hindsight-2020 Plugin
 #
 # This script provides interactive verification of the plugin's functionality.
 # Debug mode is enabled automatically.
@@ -19,7 +19,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== 2020 Plugin Manual Test ===${NC}"
+echo -e "${BLUE}=== hindsight-2020 Plugin Manual Test ===${NC}"
 echo ""
 
 # Export debug mode

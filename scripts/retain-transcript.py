@@ -9,7 +9,7 @@ DEBUG = os.environ.get("HINDSIGHT_DEBUG", "").lower() in ("1", "true", "yes")
 
 def debug(msg: str) -> None:
     if DEBUG:
-        print(f"[2020:retain-transcript] {msg}", file=sys.stderr)
+        print(f"[hindsight-2020:retain-transcript] {msg}", file=sys.stderr)
 
 
 def main():

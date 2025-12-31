@@ -12,7 +12,7 @@ This is a Claude Code plugin that provides persistent memory across conversation
 ./setup.sh
 ```
 
-This creates a Python virtual environment, installs dependencies (hindsight-client), makes scripts executable, and symlinks the plugin to `~/.claude/plugins/2020`.
+This creates a Python virtual environment, installs dependencies (hindsight-client), makes scripts executable, and symlinks the plugin to `~/.claude/plugins/hindsight-2020`.
 
 **Required environment variable**: `HINDSIGHT_API_LLM_API_KEY` must be set for Hindsight's LLM operations.
 
@@ -33,8 +33,8 @@ The plugin operates through Claude Code hooks defined in `hooks/hooks.json`:
 Each project gets its own isolated memory bank based on git repository identity (when available) or project path. **The plugin auto-detects the project directory from git root or current working directory - no environment variables needed.**
 
 **Git-based (preferred)**: Extracts owner/repo from git remote origin
-- Any clone of `gcswan/2020` → `claude-code--gcswan-2020`
-- Same memories across all paths: `/home/user/2020`, `/mnt/work/2020`, etc.
+- Any clone of `gcswan/hindsight-2020` → `claude-code--gcswan-hindsight-2020`
+- Same memories across all paths: `/home/user/hindsight-2020`, `/mnt/work/hindsight-2020`, etc.
 
 **Path-based (fallback)**: Uses last 2 path components when not in a git repo
 - `/home/user/code/myapp` → `claude-code--code-myapp`
@@ -76,14 +76,14 @@ All Python scripts are executed via the venv: `${CLAUDE_PLUGIN_ROOT}/.venv/bin/p
 
 ### Debug Logging
 
-All hook scripts support debug logging via the `HINDSIGHT_DEBUG` environment variable. When enabled, scripts output detailed information to stderr with prefixes like `[2020:script-name]`.
+All hook scripts support debug logging via the `HINDSIGHT_DEBUG` environment variable. When enabled, scripts output detailed information to stderr with prefixes like `[hindsight-2020:script-name]`.
 
 ## Slash Commands
 
 Two user-invocable commands are defined in `commands/`:
 
-- `/2020:memory-search <query>` - Search the memory bank
-- `/2020:memory-status` - Check server and bank status
+- `/hindsight-2020:memory-search <query>` - Search the memory bank
+- `/hindsight-2020:memory-status` - Check server and bank status
 
 Both commands use the `Bash` tool and are documented in markdown files.
 

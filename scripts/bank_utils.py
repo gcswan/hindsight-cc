@@ -2,7 +2,7 @@
 """
 Shared utilities for bank ID generation.
 
-This module provides consistent bank ID generation across all 2020 plugin scripts,
+This module provides consistent bank ID generation across all hindsight-2020 plugin scripts,
 using git repository identity when available, with graceful fallback to path-based IDs.
 
 NO dependency on CLAUDE_PROJECT_DIR - auto-detects project directory from git root or cwd.
@@ -25,7 +25,7 @@ def get_project_dir() -> str:
         Absolute path to project directory
 
     Examples:
-        In git repo: Returns git root (e.g., "/home/user/code/2020")
+        In git repo: Returns git root (e.g., "/home/user/code/hindsight-2020")
         Not in git repo: Returns cwd (e.g., "/tmp/test-project")
     """
     try:
@@ -121,7 +121,7 @@ def get_path_based_id(project_dir: str) -> str:
 
     Examples:
         /home/user/code/myproject -> code-myproject
-        /tmp/2020-manual-test -> tmp-2020-manual-test
+        /tmp/hindsight-2020-manual-test -> tmp-hindsight-2020-manual-test
         /single -> single-single (edge case: duplicate)
 
     Args:
@@ -163,8 +163,8 @@ def get_bank_id(debug_callback: Optional[callable] = None) -> str:
         Bank ID string with "claude-code--" prefix
 
     Examples:
-        Git repo: "claude-code--gcswan-2020"
-        Non-git: "claude-code--code-2020"
+        Git repo: "claude-code--gcswan-hindsight-2020"
+        Non-git: "claude-code--code-hindsight-2020"
         Detection fails: "claude-code--default"
     """
 

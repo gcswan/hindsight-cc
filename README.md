@@ -1,4 +1,4 @@
-# 2020
+# hindsight-2020
 
 A Claude Code plugin that provides persistent memory across conversations using the [Hindsight](https://github.com/vectorize-io/hindsight) vector database.
 
@@ -22,7 +22,7 @@ A Claude Code plugin that provides persistent memory across conversations using 
 ./setup.sh
 ```
 
-This creates the Python venv, installs dependencies, and symlinks the plugin to `~/.claude/plugins/2020`.
+This creates the Python venv, installs dependencies, and symlinks the plugin to `~/.claude/plugins/hindsight-2020`.
 
 Make sure `HINDSIGHT_API_LLM_API_KEY` is set in your environment.
 
@@ -36,8 +36,8 @@ Once installed, the plugin works automatically:
 
 ### Slash Commands
 
-- `/2020:memory-search <query>` - Search your project's memory bank
-- `/2020:memory-status` - Check server status and bank info
+- `/hindsight-2020:memory-search <query>` - Search your project's memory bank
+- `/hindsight-2020:memory-status` - Check server status and bank info
 
 ## How It Works
 
@@ -46,8 +46,8 @@ Once installed, the plugin works automatically:
 Each project gets its own isolated memory bank based on git repository identity (when available) or project path. **The plugin auto-detects the project directory from git root or current working directory - no environment variables needed.**
 
 **Git-based (preferred)**: Extracts owner/repo from git remote origin
-- Any clone of `gcswan/2020` → `claude-code--gcswan-2020`
-- Same memories across all paths: `/home/user/2020`, `/mnt/work/2020`, etc.
+- Any clone of `gcswan/hindsight-2020` → `claude-code--gcswan-hindsight-2020`
+- Same memories across all paths: `/home/user/hindsight-2020`, `/mnt/work/hindsight-2020`, etc.
 
 **Path-based (fallback)**: Uses last 2 path components when not in a git repo
 - `/home/user/code/myapp` → `claude-code--code-myapp`
@@ -106,16 +106,16 @@ export HINDSIGHT_DEBUG=1
 Debug messages are prefixed with the script name and written to stderr:
 
 ```
-[2020:ensure-hindsight] Starting
-[2020:ensure-hindsight] Server already running
-[2020:retain-prompt] Starting
-[2020:retain-prompt] Detected project directory: /home/user/code/2020
-[2020:retain-prompt] Using git-based ID: gcswan-2020
-[2020:retain-prompt] Bank ID: claude-code--gcswan-2020
-[2020:retain-prompt] Content length: 42 chars
-[2020:retain-prompt] Successfully retained prompt
-[2020:inject-memories] Found 3 memories
-[2020:inject-memories] Injected memories into prompt
+[hindsight-2020:ensure-hindsight] Starting
+[hindsight-2020:ensure-hindsight] Server already running
+[hindsight-2020:retain-prompt] Starting
+[hindsight-2020:retain-prompt] Detected project directory: /home/user/code/hindsight-2020
+[hindsight-2020:retain-prompt] Using git-based ID: gcswan-hindsight-2020
+[hindsight-2020:retain-prompt] Bank ID: claude-code--gcswan-hindsight-2020
+[hindsight-2020:retain-prompt] Content length: 42 chars
+[hindsight-2020:retain-prompt] Successfully retained prompt
+[hindsight-2020:inject-memories] Found 3 memories
+[hindsight-2020:inject-memories] Injected memories into prompt
 ```
 
 ### Server not starting
@@ -160,7 +160,7 @@ docker ps -f name=hindsight-2020
 
   1. View Logs While Running
 
-  Once Claude Code starts, all debug output appears in your terminal. For your 2020 plugin specifically:
+  Once Claude Code starts, all debug output appears in your terminal. For your hindsight-2020 plugin specifically:
 
   Option A: Combined Claude + Plugin Debug
   export HINDSIGHT_DEBUG=1  # Enable your plugin's debug logging
@@ -169,7 +169,7 @@ docker ps -f name=hindsight-2020
   This shows:
 
 - Which hooks are executing (SessionStart, UserPromptSubmit, Stop)
-- Your plugin's debug messages: [2020:inject-memories], [2020:retain-prompt], etc.
+- Your plugin's debug messages: [hindsight-2020:inject-memories], [hindsight-2020:retain-prompt], etc.
 - Hook success/failure status
 
 ## License

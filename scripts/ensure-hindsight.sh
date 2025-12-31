@@ -9,7 +9,7 @@ HEALTH_URL="http://localhost:8888/health"
 # Debug function - only outputs if HINDSIGHT_DEBUG is set
 debug() {
     if [[ "${HINDSIGHT_DEBUG,,}" =~ ^(1|true|yes)$ ]]; then
-        echo "[2020:ensure-hindsight] $1" >&2
+    echo "[hindsight-2020:ensure-hindsight] $1" >&2
     fi
 }
 
