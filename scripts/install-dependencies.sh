@@ -9,7 +9,7 @@ cd "$SCRIPT_DIR"
 # Debug helper - only outputs if HINDSIGHT_DEBUG is set
 debug() {
     if [[ "${HINDSIGHT_DEBUG:-}" =~ ^(1|true|yes)$ ]]; then
-        echo "[hindsight-2020:install-dependencies] $*" >&2
+        echo "[hindsight-cc:install-dependencies] $*" >&2
     fi
 }
 
@@ -25,7 +25,7 @@ if [ -x ".venv/bin/python3" ] && \
     exit 0
 fi
 
-debug "Setting up hindsight-2020 plugin..."
+debug "Setting up hindsight-cc plugin..."
 
 # Check Python version (requires 3.10+)
 python_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)

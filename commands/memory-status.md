@@ -47,6 +47,6 @@ Hindsight server: Unavailable (<urlopen error [Errno 111] Connection refused>)
 If the server is unavailable:
 
 1. **Start the container**: `./scripts/ensure-hindsight.sh`
-2. **Check container logs**: `docker logs hindsight-2020`
-3. **Restart if needed**: `docker restart hindsight-2020`
+2. **Check container logs**: `docker logs hindsight-cc`
+3. **Restart if needed**: `docker restart hindsight-cc`
 4. **Verify API key**: Ensure `HINDSIGHT_API_LLM_API_KEY` is set

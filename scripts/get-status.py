@@ -16,7 +16,7 @@ def main():
     # Check Docker container
     try:
         result = subprocess.run(
-            ["docker", "ps", "-f", "name=hindsight-2020", "--format", "{{.Status}}"],
+            ["docker", "ps", "-f", "name=hindsight-cc", "--format", "{{.Status}}"],
             capture_output=True, text=True, timeout=5
         )
         if result.stdout.strip():

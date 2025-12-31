@@ -33,8 +33,8 @@ The plugin operates through Claude Code hooks defined in `hooks/hooks.json`:
 Each project gets its own isolated memory bank based on git repository identity (when available) or project path. **The plugin auto-detects the project directory from git root or current working directory - no environment variables needed.**
 
 **Git-based (preferred)**: Extracts owner/repo from git remote origin
-- Any clone of `gcswan/hindsight-2020` → `claude-code--gcswan-hindsight-2020`
-- Same memories across all paths: `/home/user/hindsight-2020`, `/mnt/work/hindsight-2020`, etc.
+- Any clone of `gcswan/hindsight-cc` → `claude-code--gcswan-hindsight-cc`
+- Same memories across all paths: `/home/user/hindsight-cc`, `/mnt/work/hindsight-cc`, etc.
 
 **Path-based (fallback)**: Uses last 2 path components when not in a git repo
 - `/home/user/code/myapp` → `claude-code--code-myapp`
@@ -44,7 +44,7 @@ This ensures working on the same repository from different paths shares the same
 
 ### Hindsight Integration
 
-- **Server**: Runs in Docker container `hindsight-2020`
+- **Server**: Runs in Docker container `hindsight-cc`
 - **API endpoint**: http://localhost:8888
 - **UI**: http://localhost:9999
 - **Data storage**: `~/hindsight-data/`
@@ -76,14 +76,14 @@ All Python scripts are executed via the venv: `${CLAUDE_PLUGIN_ROOT}/scripts/.ve
 
 ### Debug Logging
 
-All hook scripts support debug logging via the `HINDSIGHT_DEBUG` environment variable. When enabled, scripts output detailed information to stderr with prefixes like `[hindsight-2020:script-name]`.
+All hook scripts support debug logging via the `HINDSIGHT_DEBUG` environment variable. When enabled, scripts output detailed information to stderr with prefixes like `[hindsight-cc:script-name]`.
 
 ## Slash Commands
 
 Two user-invocable commands are defined in `commands/`:
 
-- `/hindsight-2020:memory-search <query>` - Search the memory bank
-- `/hindsight-2020:memory-status` - Check server and bank status
+- `/hindsight-cc:memory-search <query>` - Search the memory bank
+- `/hindsight-cc:memory-status` - Check server and bank status
 
 Both commands use the `Bash` tool and are documented in markdown files.
 
@@ -96,8 +96,8 @@ export HINDSIGHT_DEBUG=1
 
 Check Docker container:
 ```bash
-docker logs hindsight-2020
-docker ps -f name=hindsight-2020
+docker logs hindsight-cc
+docker ps -f name=hindsight-cc
 ```
 
 Check server health:
@@ -107,5 +107,5 @@ curl http://localhost:8888/health
 
 Restart server:
 ```bash
-docker restart hindsight-2020
+docker restart hindsight-cc
 ```

@@ -3,13 +3,13 @@
 # Ensure Hindsight server is running
 # Called by SessionStart hook to auto-start the server
 
-CONTAINER_NAME="hindsight-2020"
+CONTAINER_NAME="hindsight-cc"
 HEALTH_URL="http://localhost:8888/health"
 
 # Debug function - only outputs if HINDSIGHT_DEBUG is set
 debug() {
     if [[ "${HINDSIGHT_DEBUG,,}" =~ ^(1|true|yes)$ ]]; then
-    echo "[hindsight-2020:ensure-hindsight] $1" >&2
+    echo "[hindsight-cc:ensure-hindsight] $1" >&2
     fi
 }
 
