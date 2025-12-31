@@ -15,6 +15,17 @@ debug() {
 
 debug "Starting"
 
+# Check Docker is available
+if ! command -v docker &> /dev/null; then
+    debug "Docker not found in PATH"
+    exit 0
+fi
+
+if ! docker info &> /dev/null 2>&1; then
+    debug "Docker daemon not running or not accessible"
+    exit 0
+fi
+
 # Check if Hindsight server is already responding
 if curl -s --connect-timeout 2 "$HEALTH_URL" > /dev/null 2>&1; then
     debug "Server already running"

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import os
 import sys
 from bank_utils import get_bank_id
 

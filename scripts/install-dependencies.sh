@@ -27,6 +27,19 @@ fi
 
 debug "Setting up hindsight-2020 plugin..."
 
+# Check Python version (requires 3.10+)
+python_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+if [[ -z "$python_version" ]]; then
+    soft_fail "python3 not found"
+fi
+
+major=$(echo "$python_version" | cut -d. -f1)
+minor=$(echo "$python_version" | cut -d. -f2)
+if [[ "$major" -lt 3 ]] || [[ "$major" -eq 3 && "$minor" -lt 10 ]]; then
+    soft_fail "Python 3.10+ required (found $python_version)"
+fi
+debug "Python version: $python_version"
+
 # Create virtual environment if it doesn't exist
 if [ ! -d ".venv" ]; then
     debug "Creating virtual environment..."

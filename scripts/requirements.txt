@@ -1,1 +1,4 @@
-hindsight-client>=0.1.16
+hindsight-client>=0.1.16,<1.0.0
+pytest>=7.0
+pyright==1.1.407
+ruff==0.14.10

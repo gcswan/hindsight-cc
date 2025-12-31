@@ -1,5 +1,9 @@
 # hindsight-2020
 
+![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
+![Docker Required](https://img.shields.io/badge/docker-required-blue.svg)
+
 A Claude Code plugin that provides persistent memory across conversations using the [Hindsight](https://github.com/vectorize-io/hindsight) vector database.
 
 ## Features
@@ -16,23 +20,11 @@ A Claude Code plugin that provides persistent memory across conversations using 
 - Python 3.10+
 - `HINDSIGHT_API_LLM_API_KEY` environment variable set (for Hindsight's LLM operations)
 
-## Installation
-
-Install the plugin via the Claude Marketplace and enable it for your project. Then install dependencies from this repo:
-
-```bash
-./scripts/install-dependencies.sh
-```
-
-This creates the Python venv under `scripts/.venv` and installs dependencies.
-
-Make sure `HINDSIGHT_API_LLM_API_KEY` is set in your environment.
-
 ## Usage
 
 Once installed, the plugin works automatically:
 
-1. **On session start**: Hindsight server starts if not already running
+1. **On session start**: Dependencies are installed and Hindsight server is started if not already running
 2. **On each prompt**: Your prompt is stored, and relevant memories are injected
 3. **On session end**: The conversation transcript is stored
 
@@ -99,9 +91,9 @@ Memory data is stored in `~/hindsight-data/`.
 
 ## Troubleshooting
 
-### Enable debug logging
+### Debug Logging
 
-Set `HINDSIGHT_DEBUG=1` to see detailed output from all plugin operations:
+Enable debug logging to see detailed output from plugin operations:
 
 ```bash
 export HINDSIGHT_DEBUG=1
@@ -110,71 +102,55 @@ export HINDSIGHT_DEBUG=1
 Debug messages are prefixed with the script name and written to stderr:
 
 ```text
-[hindsight-2020:ensure-hindsight] Starting
-[hindsight-2020:ensure-hindsight] Server already running
-[hindsight-2020:retain-prompt] Starting
 [hindsight-2020:retain-prompt] Detected project directory: /home/user/code/hindsight-2020
-[hindsight-2020:retain-prompt] Using git-based ID: gcswan-hindsight-2020
 [hindsight-2020:retain-prompt] Bank ID: claude-code--gcswan-hindsight-2020
-[hindsight-2020:retain-prompt] Content length: 42 chars
-[hindsight-2020:retain-prompt] Successfully retained prompt
 [hindsight-2020:inject-memories] Found 3 memories
-[hindsight-2020:inject-memories] Injected memories into prompt
 ```
 
-### Server not starting
-
-Check Docker logs:
+For combined Claude Code and plugin debugging:
 
 ```bash
-docker logs hindsight-2020
+export HINDSIGHT_DEBUG=1
+claude --debug "hooks"
 ```
 
-### Check server health
+This shows hook execution, plugin debug messages, and success/failure status.
+
+### Server Issues
+
+Check server health:
 
 ```bash
 curl http://localhost:8888/health
 ```
 
-### Restart server
-
-```bash
-docker restart hindsight-2020
-```
-
-### View container status
+View container status:
 
 ```bash
 docker ps -f name=hindsight-2020
 ```
 
-## Debug Mode
+Check container logs:
 
-### Standard claude code debug mode
+```bash
+docker logs hindsight-2020
+```
 
-  claude --debug
+Restart the server:
 
-### Debug specific categories (hooks, API calls)
+```bash
+docker restart hindsight-2020
+```
 
-  claude --debug "hooks,api"
+## Testing
 
-### Exclude telemetry/stats noise
+Run tests and checks from the repo root using the scripts venv:
 
-  claude --debug "!statsig,!file"
-
-  1. View Logs While Running
-
-  Once Claude Code starts, all debug output appears in your terminal. For your hindsight-2020 plugin specifically:
-
-  Option A: Combined Claude + Plugin Debug
-  export HINDSIGHT_DEBUG=1  # Enable your plugin's debug logging
-  claude --debug "hooks"     # Enable Claude Code hook debugging
-
-  This shows:
-
-- Which hooks are executing (SessionStart, UserPromptSubmit, Stop)
-- Your plugin's debug messages: [hindsight-2020:inject-memories], [hindsight-2020:retain-prompt], etc.
-- Hook success/failure status
+```bash
+./scripts/.venv/bin/pytest scripts/test
+./scripts/.venv/bin/ruff check scripts/test/test_bank_utils.py
+./scripts/.venv/bin/pyright scripts/test/test_bank_utils.py
+```
 
 ## License
 
