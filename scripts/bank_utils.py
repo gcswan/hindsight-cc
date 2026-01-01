@@ -4,20 +4,18 @@ Shared utilities for bank ID generation.
 
 This module provides consistent bank ID generation across all hindsight-cc plugin scripts,
 using git repository identity when available, with graceful fallback to path-based IDs.
-
-NO dependency on CLAUDE_PROJECT_DIR - auto-detects project directory from git root or cwd.
 """
 
 import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 def get_project_dir() -> str:
     """
-    Auto-detect project directory without CLAUDE_PROJECT_DIR.
+    Auto-detect project directory
 
     Tries to find git repository root first, falls back to current working directory.
 
@@ -34,12 +32,16 @@ def get_project_dir() -> str:
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
-            timeout=2
+            timeout=2,
         )
 
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+    except (
+        subprocess.TimeoutExpired,
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+    ):
         pass
 
     # Fall back to current working directory
@@ -70,7 +72,7 @@ def get_git_remote_id(project_dir: str) -> Optional[str]:
             ["git", "-C", project_dir, "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
-            timeout=2
+            timeout=2,
         )
 
         if result.returncode != 0:
@@ -81,13 +83,13 @@ def get_git_remote_id(project_dir: str) -> Optional[str]:
             return None
 
         # Remove .git suffix
-        url = re.sub(r'\.git$', '', url)
+        url = re.sub(r"\.git$", "", url)
 
         # Pattern 1: SSH format (git@domain:path)
-        ssh_match = re.match(r'^git@[^:]+:(.+)$', url)
+        ssh_match = re.match(r"^git@[^:]+:(.+)$", url)
         if ssh_match:
             path = ssh_match.group(1)
-            parts = path.split('/')
+            parts = path.split("/")
             # Use last 2 components for owner/repo
             if len(parts) >= 2:
                 return f"{parts[-2]}-{parts[-1]}"
@@ -95,10 +97,10 @@ def get_git_remote_id(project_dir: str) -> Optional[str]:
                 return parts[0]
 
         # Pattern 2: HTTPS format (https://domain/path)
-        https_match = re.match(r'^https?://(?:[^@]+@)?[^/]+/(.+)$', url)
+        https_match = re.match(r"^https?://(?:[^@]+@)?[^/]+/(.+)$", url)
         if https_match:
             path = https_match.group(1)
-            parts = path.split('/')
+            parts = path.split("/")
             # Use last 2 components for owner/repo
             if len(parts) >= 2:
                 return f"{parts[-2]}-{parts[-1]}"
@@ -107,7 +109,11 @@ def get_git_remote_id(project_dir: str) -> Optional[str]:
 
         return None
 
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+    except (
+        subprocess.TimeoutExpired,
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+    ):
         # Git not available, not in git repo, or timeout
         return None
     except Exception:
@@ -145,7 +151,7 @@ def get_path_based_id(project_dir: str) -> str:
         return "unknown-unknown"
 
 
-def get_bank_id(debug_callback: Optional[callable] = None) -> str:
+def get_bank_id(debug_callback: Optional[Callable[[str], None]] = None) -> str:
     """
     Generate bank ID for Hindsight memory storage.
 
