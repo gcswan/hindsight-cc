@@ -1,16 +1,10 @@
 {
   "name": "hindsight-cc",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Persistent memory across Claude Code conversations using Hindsight vector database",
   "author": {
     "name": "gcswan"
   },
   "license": "MIT",
-  "keywords": [
-    "memory",
-    "context",
-    "hindsight",
-    "persistence",
-    "recall"
-  ]
+  "keywords": ["memory", "context", "hindsight", "persistence", "recall"]
 }

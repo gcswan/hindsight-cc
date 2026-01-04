@@ -4,13 +4,13 @@
   "version": "1.0.0",
   "owner": {
     "name": "gcswan",
-    "email": "noreply@github.com"
+    "email": "greg.c.swan@gmail.com"
   },
   "plugins": [
     {
       "name": "hindsight-cc",
       "description": "Persistent memory across Claude Code conversations using Hindsight vector database",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": {
         "name": "gcswan",
         "email": "noreply@github.com"
