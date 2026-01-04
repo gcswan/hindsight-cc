@@ -1,43 +1,21 @@
 ---
-description: Search your project's memory bank for relevant context
+description: Search the Hindsight memory bank for this project to find precedence for the task at hand
 allowed-tools: Bash
+argument-hint: [query]
 ---
 
-# Search Memory
+# Hindsight Mermory Search Skill
 
-Search the Hindsight memory bank for context relevant to a query.
+## How to Execute
 
-## How memory search works
+Run the following command to search your project's memory bank. nd.
 
-memory-search passes a memory bank id and a query to `Hindsight.recall()`
-
-Recall performs 4 retrieval strategies in parallel:
-
-- Semantic: Vector similarity
-- Keyword: BM25 exact matching
-- Graph: Entity/temporal/causal links
-- Temporal: Time range filtering
-
-The individual results from the retrievals are merged, then ordered by relevance using reciprocal rank fusion and a cross-encoder reranking model.
-
-The final output is trimmed as needed to fit within the token limit.
-
-### Output Format
-
-#### When memories are found
-
-```text
-Found 3 relevant memories:
-
---- Memory 1 ---
-User asked about implementing JWT authentication...
-
---- Memory 2 ---
-Discussion about OAuth2 token refresh...
+```bash
+${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search-memories.py $ARGUMENTS
 ```
 
-#### When no memories match
+If no query is provided, ask the user what they want to search for.
 
-```text
-No relevant memories found.
-```
+## How to Handle Output
+
+The script will return relevant memories from the memory bank. Provide a summary of the memories, highlighting any prior key decisions, lessons learned, patterns observed, or any additional context.
