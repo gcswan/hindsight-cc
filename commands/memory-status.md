@@ -16,3 +16,9 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3 ${CLAUDE_PLUGIN_ROOT}/scripts/ge
 ## How To Handle Output
 
 The output will show a table with project directory, memory bank ID, Hindsight container status, and server health status. Display this information to the user in a clear format.
+
+## Finally
+
+Provide helpful yet concise instructions on accessing the projects memories in a
+browser. Construct and display the memory bank url by substituting the returned
+bank ID: `http://localhost:9999/banks/${BANK_ID}`
