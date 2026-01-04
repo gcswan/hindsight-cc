@@ -1,5 +1,5 @@
 ---
-description: Search the Hindsight memory bank for this project to find precedence for the task at hand
+description: Search memory bank for past context and decisions relevant to current task or query
 allowed-tools: Bash
 argument-hint: [query]
 ---
@@ -8,7 +8,7 @@ argument-hint: [query]
 
 ## How to Execute
 
-Run the following command to search your project's memory bank. nd.
+Run the following command to search your project's memory bank. When a user directly calls this skill with a query, pass the query as an argument. When invoked proactively by Claude, summarize the current session context as the search query.
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search-memories.py $ARGUMENTS
