@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-01-04
+
+### Added
+
+- User instructions to memory-status slash command for improved usability
+
+### Changed
+
+- Rewrote slash command descriptions to be more action-oriented
+- Pinned Hindsight Docker image to specific version tag with `HINDSIGHT_IMAGE` override option
+
+### Fixed
+
+- Made plugin scripts POSIX-safe for better cross-platform compatibility
+- Fixed `Callable` type annotation in bank_utils.py
+- Added `.python-version` file to track Python version requirements
+
+### Documentation
+
+- Added privacy and data handling note to README
+- Updated Python version badge in README
+
 ## [1.0.0] - 2025-12-31
 
 ### Added
