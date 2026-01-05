@@ -1,5 +1,6 @@
 # hindsight-cc
 
+
 ![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Docker Required](https://img.shields.io/badge/docker-required-blue.svg)
@@ -18,7 +19,13 @@ A Claude Code plugin that provides persistent memory across conversations using 
 
 - Docker installed and running
 - Python 3.10+
-- `HINDSIGHT_API_LLM_API_KEY` environment variable set (for Hindsight's LLM operations)
+
+**IMPORTANT**
+Set the LLM provider API token before installing in claude code 
+
+```bash
+export HINDSIGHT_API_LLM_API_KEY=OPENAI_API_KEY
+```
 
 ## Usage
 
