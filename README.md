@@ -1,6 +1,5 @@
 # hindsight-cc
 
-
 ![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Docker Required](https://img.shields.io/badge/docker-required-blue.svg)
@@ -21,10 +20,47 @@ A Claude Code plugin that provides persistent memory across conversations using 
 - Python 3.10+
 
 **IMPORTANT**
-Set the LLM provider API token before installing in claude code 
+Set the LLM provider, model, and token in your environment before installing in
+claude code.
 
 ```bash
-export HINDSIGHT_API_LLM_API_KEY=OPENAI_API_KEY
+# Groq (recommended for fast inference)
+export HINDSIGHT_API_LLM_PROVIDER=groq
+export HINDSIGHT_API_LLM_API_KEY=gsk_xxxxxxxxxxxx
+export HINDSIGHT_API_LLM_MODEL=openai/gpt-oss-20b
+# For free tier users: override to on_demand if you get service_tier errors
+# export HINDSIGHT_API_LLM_GROQ_SERVICE_TIER=on_demand
+
+# OpenAI
+export HINDSIGHT_API_LLM_PROVIDER=openai
+export HINDSIGHT_API_LLM_API_KEY=sk-xxxxxxxxxxxx
+export HINDSIGHT_API_LLM_MODEL=gpt-4o
+
+# Gemini
+export HINDSIGHT_API_LLM_PROVIDER=gemini
+export HINDSIGHT_API_LLM_API_KEY=xxxxxxxxxxxx
+export HINDSIGHT_API_LLM_MODEL=gemini-2.0-flash
+
+# Anthropic
+export HINDSIGHT_API_LLM_PROVIDER=anthropic
+export HINDSIGHT_API_LLM_API_KEY=sk-ant-xxxxxxxxxxxx
+export HINDSIGHT_API_LLM_MODEL=claude-sonnet-4-20250514
+
+# Ollama (local, no API key)
+export HINDSIGHT_API_LLM_PROVIDER=ollama
+export HINDSIGHT_API_LLM_BASE_URL=http://localhost:11434/v1
+export HINDSIGHT_API_LLM_MODEL=llama3
+
+# LM Studio (local, no API key)
+export HINDSIGHT_API_LLM_PROVIDER=lmstudio
+export HINDSIGHT_API_LLM_BASE_URL=http://localhost:1234/v1
+export HINDSIGHT_API_LLM_MODEL=your-local-model
+
+# OpenAI-compatible endpoint
+export HINDSIGHT_API_LLM_PROVIDER=openai
+export HINDSIGHT_API_LLM_BASE_URL=https://your-endpoint.com/v1
+export HINDSIGHT_API_LLM_API_KEY=your-api-key
+export HINDSIGHT_API_LLM_MODEL=your-model-name
 ```
 
 ## Usage
@@ -81,12 +117,12 @@ memory text 2
 
 ### Environment Variables
 
-| Variable | Description | Default |
-| -------- | ----------- | ------- |
-| `HINDSIGHT_API_LLM_API_KEY` | API key for Hindsight LLM operations | (required) |
-| `HINDSIGHT_API_LLM_MODEL` | LLM model for Hindsight | `gpt-4o-mini` |
-| `HINDSIGHT_DEBUG` | Enable debug logging (`1`, `true`, or `yes`) | (disabled) |
-| `HINDSIGHT_IMAGE` | Docker image for Hindsight server | `ghcr.io/vectorize-io/hindsight:0.1.16` |
+| Variable                    | Description                                  | Default                                 |
+| --------------------------- | -------------------------------------------- | --------------------------------------- |
+| `HINDSIGHT_API_LLM_API_KEY` | API key for Hindsight LLM operations         | (required)                              |
+| `HINDSIGHT_API_LLM_MODEL`   | LLM model for Hindsight                      | `gpt-4o-mini`                           |
+| `HINDSIGHT_DEBUG`           | Enable debug logging (`1`, `true`, or `yes`) | (disabled)                              |
+| `HINDSIGHT_IMAGE`           | Docker image for Hindsight server            | `ghcr.io/vectorize-io/hindsight:0.1.16` |
 
 ### Data Storage
 
