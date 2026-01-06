@@ -9,30 +9,30 @@ HINDSIGHT_IMAGE_DEFAULT="ghcr.io/vectorize-io/hindsight:0.1.16"
 
 # Debug function - only outputs if HINDSIGHT_DEBUG is set
 debug() {
-    case "${HINDSIGHT_DEBUG:-}" in
-        1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])
-            echo "[hindsight-cc:ensure-hindsight] $1" >&2
-            ;;
-    esac
+	case "${HINDSIGHT_DEBUG:-}" in
+	1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss])
+		echo "[hindsight-cc:ensure-hindsight] $1" >&2
+		;;
+	esac
 }
 
 debug "Starting"
 
 # Check Docker is available
 if ! command -v docker >/dev/null 2>&1; then
-    debug "Docker not found in PATH"
-    exit 0
+	debug "Docker not found in PATH"
+	exit 0
 fi
 
 if ! docker info >/dev/null 2>&1; then
-    debug "Docker daemon not running or not accessible"
-    exit 0
+	debug "Docker daemon not running or not accessible"
+	exit 0
 fi
 
 # Check if Hindsight server is already responding
-if curl -s --connect-timeout 2 "$HEALTH_URL" > /dev/null 2>&1; then
-    debug "Server already running"
-    exit 0
+if curl -s --connect-timeout 2 "$HEALTH_URL" >/dev/null 2>&1; then
+	debug "Server already running"
+	exit 0
 fi
 
 debug "Server not responding, checking container status"
@@ -41,45 +41,46 @@ debug "Server not responding, checking container status"
 CONTAINER_ID=$(docker ps -aq -f "name=$CONTAINER_NAME" 2>/dev/null)
 
 if [ -n "$CONTAINER_ID" ]; then
-    # Container exists, try to start it
-    debug "Found existing container $CONTAINER_ID, starting it"
-    docker start "$CONTAINER_ID" > /dev/null 2>&1
+	# Container exists, try to start it
+	debug "Found existing container $CONTAINER_ID, starting it"
+	docker start "$CONTAINER_ID" >/dev/null 2>&1
 else
-    # No container, create and start new one
-    debug "No existing container, creating new one"
-    mkdir -p ~/hindsight-data
+	# No container, create and start new one
+	debug "No existing container, creating new one"
+	mkdir -p ~/hindsight-data
 
-    # Get API key from environment
-    API_KEY="$HINDSIGHT_API_LLM_API_KEY"
+	# Get API key from environment
+	API_KEY="$HINDSIGHT_API_LLM_API_KEY"
 
-    if [ -z "$API_KEY" ]; then
-        echo "Warning: HINDSIGHT_API_LLM_API_KEY not set" >&2
-        echo "Hindsight LLM features may not work" >&2
-    fi
+	if [ -z "$API_KEY" ]; then
+		echo "Warning: HINDSIGHT_API_LLM_API_KEY not set" >&2
+		echo "Hindsight LLM features may not work" >&2
+	fi
 
-    HINDSIGHT_IMAGE="${HINDSIGHT_IMAGE:-$HINDSIGHT_IMAGE_DEFAULT}"
-    debug "Starting new container with image ${HINDSIGHT_IMAGE}"
-    debug "Starting Hindsight with model: ${HINDSIGHT_API_LLM_MODEL:-gpt-4o-mini}"
+	HINDSIGHT_IMAGE="${HINDSIGHT_IMAGE:-$HINDSIGHT_IMAGE_DEFAULT}"
+	debug "Starting new container with image ${HINDSIGHT_IMAGE}"
+	debug "Starting Hindsight with model: ${HINDSIGHT_API_LLM_MODEL:-gpt-4o-mini}"
 
-    # Start Hindsight container in detached mode
-    docker run -d --name "$CONTAINER_NAME" \
-        -p 8888:8888 -p 9999:9999 \
-        -e HINDSIGHT_API_LLM_API_KEY="$API_KEY" \
-        -e HINDSIGHT_API_LLM_MODEL="${HINDSIGHT_API_LLM_MODEL:-gpt-4o-mini}" \
-        -v "$HOME/hindsight-data:/home/hindsight/.pg0" \
-        "$HINDSIGHT_IMAGE" > /dev/null 2>&1
+	# Start Hindsight container in detached mode
+	docker run -d --name "$CONTAINER_NAME" \
+		-p 8888:8888 -p 9999:9999 \
+		-e HINDSIGHT_API_LLM_API_KEY="$API_KEY" \
+		-e HINDSIGHT_API_LLM_MODEL="${HINDSIGHT_API_LLM_MODEL:-gpt-5-nano}" \
+		-e HINDSIGHT_API_LLM_PROVIDER="${HINDSIGHT_API_LLM_PROVIDER:-openai}" \
+		-v "$HOME/hindsight-data:/home/hindsight/.pg0" \
+		"$HINDSIGHT_IMAGE" >/dev/null 2>&1
 fi
 
 # Wait for server to be ready (up to 30 seconds)
 debug "Waiting for server to be ready (up to 30 seconds)"
 i=1
 while [ "$i" -le 30 ]; do
-    if curl -s --connect-timeout 1 "$HEALTH_URL" > /dev/null 2>&1; then
-        debug "Server ready after $i seconds"
-        exit 0
-    fi
-    sleep 1
-    i=$((i + 1))
+	if curl -s --connect-timeout 1 "$HEALTH_URL" >/dev/null 2>&1; then
+		debug "Server ready after $i seconds"
+		exit 0
+	fi
+	sleep 1
+	i=$((i + 1))
 done
 
 debug "Server did not start within 30 seconds"
