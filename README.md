@@ -6,6 +6,27 @@
 
 A Claude Code plugin that provides persistent memory across conversations using the [Hindsight](https://github.com/vectorize-io/hindsight) vector database.
 
+## Installation
+
+**IMPORTANT**
+Set the LLM provider, model, and token in your environment before installing in
+claude code.
+
+Install directly from the GitHub marketplace:
+
+```bash
+claude plugin add gcswan/hindsight-cc
+```
+
+After installation, the first time you try to run Claude it will take longer
+than usual as it's installing dependencies.
+
+To verify installation:
+
+```bash
+claude plugin list
+```
+
 ## Features
 
 - **Automatic Memory Injection**: Relevant context from past conversations is automatically injected into your prompts
@@ -18,10 +39,6 @@ A Claude Code plugin that provides persistent memory across conversations using 
 
 - Docker installed and running
 - Python 3.10+
-
-**IMPORTANT**
-Set the LLM provider, model, and token in your environment before installing in
-claude code.
 
 ```bash
 # Groq (recommended for fast inference)
