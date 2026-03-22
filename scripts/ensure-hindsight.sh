@@ -6,6 +6,7 @@
 CONTAINER_NAME="hindsight-cc"
 HEALTH_URL="http://localhost:8888/health"
 HINDSIGHT_IMAGE_DEFAULT="ghcr.io/vectorize-io/hindsight:0.1.16"
+API_KEY="${HINDSIGHT_API_LLM_API_KEY:-}"
 
 # Debug function - only outputs if HINDSIGHT_DEBUG is set
 debug() {
@@ -14,6 +15,43 @@ debug() {
 		echo "[hindsight-cc:ensure-hindsight] $1" >&2
 		;;
 	esac
+}
+
+require_api_key() {
+	if [ -n "$API_KEY" ]; then
+		return 0
+	fi
+
+	echo "Error: HINDSIGHT_API_LLM_API_KEY is required before starting Hindsight" >&2
+	return 1
+}
+
+container_missing_api_key() {
+	container_id="$1"
+	container_env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" 2>/dev/null)
+
+	if [ -z "$container_env" ]; then
+		return 1
+	fi
+
+	echo "$container_env" | grep -q '^HINDSIGHT_API_LLM_API_KEY=$'
+}
+
+create_container() {
+	debug "Creating Hindsight container"
+	mkdir -p ~/hindsight-data
+
+	HINDSIGHT_IMAGE="${HINDSIGHT_IMAGE:-$HINDSIGHT_IMAGE_DEFAULT}"
+	debug "Starting new container with image ${HINDSIGHT_IMAGE}"
+	debug "Starting Hindsight with model: ${HINDSIGHT_API_LLM_MODEL:-gpt-5-nano}"
+
+	docker run -d --name "$CONTAINER_NAME" \
+		-p 8888:8888 -p 9999:9999 \
+		-e HINDSIGHT_API_LLM_API_KEY="$API_KEY" \
+		-e HINDSIGHT_API_LLM_MODEL="${HINDSIGHT_API_LLM_MODEL:-gpt-5-nano}" \
+		-e HINDSIGHT_API_LLM_PROVIDER="${HINDSIGHT_API_LLM_PROVIDER:-openai}" \
+		-v "$HOME/hindsight-data:/home/hindsight/.pg0" \
+		"$HINDSIGHT_IMAGE" >/dev/null 2>&1
 }
 
 debug "Starting"
@@ -41,34 +79,26 @@ debug "Server not responding, checking container status"
 CONTAINER_ID=$(docker ps -aq -f "name=$CONTAINER_NAME" 2>/dev/null)
 
 if [ -n "$CONTAINER_ID" ]; then
-	# Container exists, try to start it
-	debug "Found existing container $CONTAINER_ID, starting it"
-	docker start "$CONTAINER_ID" >/dev/null 2>&1
-else
-	# No container, create and start new one
-	debug "No existing container, creating new one"
-	mkdir -p ~/hindsight-data
+	debug "Found existing container $CONTAINER_ID"
 
-	# Get API key from environment
-	API_KEY="$HINDSIGHT_API_LLM_API_KEY"
+	if container_missing_api_key "$CONTAINER_ID"; then
+		if ! require_api_key; then
+			exit 1
+		fi
 
-	if [ -z "$API_KEY" ]; then
-		echo "Warning: HINDSIGHT_API_LLM_API_KEY not set" >&2
-		echo "Hindsight LLM features may not work" >&2
+		debug "Existing container is missing HINDSIGHT_API_LLM_API_KEY, recreating it"
+		docker rm -f "$CONTAINER_ID" >/dev/null 2>&1
+		create_container
+	else
+		debug "Starting existing container"
+		docker start "$CONTAINER_ID" >/dev/null 2>&1
 	fi
-
-	HINDSIGHT_IMAGE="${HINDSIGHT_IMAGE:-$HINDSIGHT_IMAGE_DEFAULT}"
-	debug "Starting new container with image ${HINDSIGHT_IMAGE}"
-	debug "Starting Hindsight with model: ${HINDSIGHT_API_LLM_MODEL:-gpt-4o-mini}"
-
-	# Start Hindsight container in detached mode
-	docker run -d --name "$CONTAINER_NAME" \
-		-p 8888:8888 -p 9999:9999 \
-		-e HINDSIGHT_API_LLM_API_KEY="$API_KEY" \
-		-e HINDSIGHT_API_LLM_MODEL="${HINDSIGHT_API_LLM_MODEL:-gpt-5-nano}" \
-		-e HINDSIGHT_API_LLM_PROVIDER="${HINDSIGHT_API_LLM_PROVIDER:-openai}" \
-		-v "$HOME/hindsight-data:/home/hindsight/.pg0" \
-		"$HINDSIGHT_IMAGE" >/dev/null 2>&1
+else
+	debug "No existing container, creating new one"
+	if ! require_api_key; then
+		exit 1
+	fi
+	create_container
 fi
 
 # Wait for server to be ready (up to 30 seconds)

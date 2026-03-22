@@ -15,7 +15,7 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3 ${CLAUDE_PLUGIN_ROOT}/scripts/ge
 
 ## How To Handle Output
 
-The output will show a table with project directory, memory bank ID, Hindsight container status, and server health status. Display this information to the user in a clear format.
+The output will show project directory, memory bank ID, and server health status. Display this information to the user in a clear format.
 
 ## Finally
 
