@@ -11,7 +11,7 @@ argument-hint: [query]
 Run the following command to search your project's memory bank. When a user directly calls this skill with a query, pass the query as an argument. When invoked proactively by Claude, summarize the current session context as the search query.
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search-memories.py $ARGUMENTS
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search-memories.py $ARGUMENTS
 ```
 
 If no query is provided, ask the user what they want to search for.

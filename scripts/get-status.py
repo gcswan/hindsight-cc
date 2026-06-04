@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import errno
+import os
 import urllib.error
 import urllib.request
 
 from bank_utils import get_bank_id, get_project_dir
 
 
-HEALTH_URL = "http://localhost:8888/health"
+BASE_URL = os.environ.get("HINDSIGHT_BASE_URL", "http://localhost:8888").rstrip("/")
+HEALTH_URL = f"{BASE_URL}/health"
 UI_URL_TEMPLATE = "http://localhost:9999/banks/{bank_id}"
 
 
