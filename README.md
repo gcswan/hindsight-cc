@@ -139,7 +139,7 @@ memory text 2
 | `HINDSIGHT_API_LLM_API_KEY` | API key for Hindsight LLM operations         | (required)                              |
 | `HINDSIGHT_API_LLM_MODEL`   | LLM model for Hindsight                      | `gpt-4o-mini`                           |
 | `HINDSIGHT_DEBUG`           | Enable debug logging (`1`, `true`, or `yes`) | (disabled)                              |
-| `HINDSIGHT_IMAGE`           | Docker image for Hindsight server            | `ghcr.io/vectorize-io/hindsight:0.1.16` |
+| `HINDSIGHT_IMAGE`           | Docker image for Hindsight server            | `ghcr.io/vectorize-io/hindsight:0.7.2` |
 
 ### Data Storage
 

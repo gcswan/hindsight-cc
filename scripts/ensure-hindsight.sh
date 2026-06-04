@@ -5,7 +5,7 @@
 
 CONTAINER_NAME="hindsight-cc"
 HEALTH_URL="http://localhost:8888/health"
-HINDSIGHT_IMAGE_DEFAULT="ghcr.io/vectorize-io/hindsight:0.1.16"
+HINDSIGHT_IMAGE_DEFAULT="ghcr.io/vectorize-io/hindsight:0.7.2"
 API_KEY="${HINDSIGHT_API_LLM_API_KEY:-}"
 
 # Debug function - only outputs if HINDSIGHT_DEBUG is set
@@ -45,7 +45,11 @@ create_container() {
 	debug "Starting new container with image ${HINDSIGHT_IMAGE}"
 	debug "Starting Hindsight with model: ${HINDSIGHT_API_LLM_MODEL:-gpt-5-nano}"
 
+	# Embedded Postgres builds a to_tsvector GENERATED column during migrations,
+	# needing >500MB shared memory; Docker's default 64MB /dev/shm causes DiskFull
+	# crashes on first start/upgrade.
 	docker run -d --name "$CONTAINER_NAME" \
+		--shm-size=2g \
 		-p 8888:8888 -p 9999:9999 \
 		-e HINDSIGHT_API_LLM_API_KEY="$API_KEY" \
 		-e HINDSIGHT_API_LLM_MODEL="${HINDSIGHT_API_LLM_MODEL:-gpt-5-nano}" \

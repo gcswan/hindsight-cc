@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-06-04
+
+### Changed
+
+- Pin the Hindsight server image to `0.7.2` (was `0.1.16`).
+- Run the container with `--shm-size=2g`. The embedded Postgres builds a
+  `to_tsvector` GENERATED column during migrations, which needs >500MB of
+  shared memory; Docker's default 64MB `/dev/shm` causes `DiskFull` crashes
+  on first start and on upgrades over a non-trivial data set.
+
 ## [1.3.0] - 2026-01-06
 
 ### Added
