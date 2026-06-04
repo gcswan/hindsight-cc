@@ -11,10 +11,13 @@ end-to-end -- importantly, it avoids the sys.path trap where a stub
 always sys.path[0]).
 """
 
+import importlib.util
+import io
 import json
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -25,9 +28,15 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 
 class _StubHandler(BaseHTTPRequestHandler):
-    """Returns a configurable recall payload; accepts everything else as 200."""
+    """Returns a configurable recall payload; accepts everything else as 200.
+
+    Each received request is recorded as (path, parsed_json_body_or_None) on the
+    class-level `received` list so tests can assert what reached the server. The
+    list is reset per test by the stub_server fixture.
+    """
 
     recall_results = []  # type: list
+    received = []  # type: list
 
     def log_message(self, *args):  # silence stderr noise during tests
         pass
@@ -35,17 +44,27 @@ class _StubHandler(BaseHTTPRequestHandler):
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
         if length:
-            self.rfile.read(length)
+            return self.rfile.read(length)
+        return b""
+
+    def _record(self, raw):
+        try:
+            body = json.loads(raw) if raw else None
+        except Exception:
+            body = None
+        type(self).received.append((self.path, body))
 
     def do_GET(self):
-        self._read_body()
+        raw = self._read_body()
+        self._record(raw)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b"{}")
 
     def do_POST(self):
-        self._read_body()
+        raw = self._read_body()
+        self._record(raw)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -75,6 +94,7 @@ def stub_server():
         _StubHandler.recall_results = results
 
     set_recall_results([])
+    _StubHandler.received = []  # reset recorded requests per test
     try:
         yield f"http://{host}:{port}", set_recall_results
     finally:
@@ -102,6 +122,21 @@ def _env_path():
     import os
 
     return os.environ.get("PATH", "/usr/bin:/bin")
+
+
+def _poll_received(predicate, timeout=5.0, interval=0.05):
+    """Poll _StubHandler.received until predicate matches a request or timeout.
+
+    Returns the matching (path, body) tuple, or None if it never arrives. Used
+    to observe the ASYNCHRONOUS detached (forked) retain landing on the stub.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for item in list(_StubHandler.received):
+            if predicate(item):
+                return item
+        time.sleep(interval)
+    return None
 
 
 class TestInjectMemories:
@@ -170,6 +205,36 @@ class TestRetainPrompt:
         assert proc.returncode == 0
         assert proc.stdout == ""
 
+    def test_detached_retain_actually_reaches_server(self, stub_server):
+        """C1: prove the fire-and-forget (forked) retain lands on the server.
+
+        The retain runs in a detached os.fork() child, so it arrives
+        asynchronously after the parent has already returned. We poll the stub's
+        recorded requests until the POST to /memories shows up.
+        """
+        base_url, _ = stub_server
+        proc = _run_hook(
+            "retain-prompt.py", {"prompt": "remember THIS-token"}, base_url
+        )
+        # Parent must return promptly with empty stdout (detachment didn't block
+        # and didn't pollute the injected-prompt channel).
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+
+        match = _poll_received(
+            lambda item: item[0].endswith("/memories")
+        )
+        assert match is not None, "detached retain never reached the server"
+        path, body = match
+        assert path.endswith("/memories")
+        assert body is not None
+        assert body["items"][0]["content"] == "remember THIS-token"
+        assert body["async"] is True
+        # Path looks like /v1/default/banks/<bank>/memories with a real bank id.
+        segments = path.strip("/").split("/")
+        bank_segment = segments[segments.index("banks") + 1]
+        assert bank_segment.startswith("claude-code--")
+
 
 class TestRetainTranscript:
     def _write_transcript(self, tmp_path):
@@ -204,6 +269,28 @@ class TestRetainTranscript:
         assert proc.returncode == 0
         assert proc.stdout == ""
 
+    def test_detached_retain_reaches_server_with_message_text(
+        self, tmp_path, stub_server
+    ):
+        """C1: the transcript's message text lands on the server (async fork)."""
+        base_url, _ = stub_server
+        transcript = self._write_transcript(tmp_path)
+        proc = _run_hook(
+            "retain-transcript.py",
+            {"transcript_path": str(transcript)},
+            base_url,
+        )
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None, "detached retain never reached the server"
+        path, body = match
+        content = body["items"][0]["content"]
+        # Transcript is sliced from the last user message onwards.
+        assert "the last question" in content
+        assert "the last answer" in content
+
     def test_missing_transcript_path_exits_zero(self):
         proc = _run_hook("retain-transcript.py", {})
         assert proc.returncode == 0
@@ -213,6 +300,43 @@ class TestRetainTranscript:
         proc = _run_hook("retain-transcript.py", "garbage")
         assert proc.returncode == 0
         assert proc.stdout == ""
+
+
+def _load_script_module(filename, mod_name):
+    """Load a hyphenated script (e.g. inject-memories.py) via importlib."""
+    path = SCRIPTS_DIR / filename
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestInjectMemoriesRecallArgs:
+    """C2: inject-memories.py must call recall with timeout=2.5 and budget=low."""
+
+    def test_main_passes_hard_timeout_and_low_budget(self, monkeypatch):
+        inject = _load_script_module("inject-memories.py", "inject_under_test")
+
+        recorded = {}
+
+        def fake_recall(bank_id, query, **kwargs):
+            recorded["bank_id"] = bank_id
+            recorded["query"] = query
+            recorded["kwargs"] = kwargs
+            return []
+
+        # The script calls hindsight_api.recall; both the script's module and
+        # this test share the same imported hindsight_api object.
+        monkeypatch.setattr(inject.hindsight_api, "recall", fake_recall)
+        monkeypatch.setattr(
+            sys, "stdin", io.StringIO(json.dumps({"prompt": "hello there"}))
+        )
+
+        inject.main()
+
+        assert recorded["query"] == "hello there"
+        assert recorded["kwargs"].get("timeout") == 2.5
+        assert recorded["kwargs"].get("budget") == "low"
 
 
 class TestHooksJson:

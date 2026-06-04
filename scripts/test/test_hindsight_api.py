@@ -169,6 +169,16 @@ class TestRecall:
         ):
             assert hindsight_api.recall("bank", "q") == []
 
+    def test_default_timeout_is_2_5s_hard_bound(self):
+        """recall() forwards its 2.5s default timeout to urlopen (keyword arg)."""
+        with patch(
+            "hindsight_api.urllib.request.urlopen",
+            return_value=_mock_response({"results": []}),
+        ) as m:
+            hindsight_api.recall("bank", "q")
+        # _post_json calls urlopen(req, timeout=timeout) -> keyword arg.
+        assert m.call_args.kwargs["timeout"] == 2.5
+
 
 class TestReflect:
     def test_url_and_optional_fields_omitted(self):

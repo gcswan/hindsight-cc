@@ -409,6 +409,39 @@ flow_test_local_provider_no_key() {
 	rm -rf "$tmp"
 }
 
+flow_test_no_key_aborts_without_create() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_g.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+
+	# No API key, no base URL, health fails, and no existing container of either
+	# name. require_api_key must abort: the script exits 1 and creates NOTHING
+	# (it must refuse to spin up a keyless cloud container). The real environment
+	# has a key set, so we unset it (and provider/base URL) in this subshell.
+	out=$(
+		unset HINDSIGHT_API_LLM_API_KEY HINDSIGHT_API_LLM_BASE_URL HINDSIGHT_API_LLM_PROVIDER
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(g): keyless run aborts with exit 1" "1" "$rc"
+	if log_has "run -d" "$log"; then
+		fail "flow(g): keyless run must NOT create a container (docker run -d found)"
+	else
+		pass "flow(g): no docker run on keyless abort"
+	fi
+
+	rm -rf "$tmp"
+}
+
 flow_test_no_docker() {
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_c.XXXXXX")
 	# Empty shim dir as the ONLY PATH so `command -v docker` fails. The script
@@ -436,6 +469,7 @@ flow_test_migration_then_create
 flow_test_recreate_on_missing_key
 flow_test_migration_noop_when_both_exist
 flow_test_local_provider_no_key
+flow_test_no_key_aborts_without_create
 flow_test_no_docker
 
 echo ""
