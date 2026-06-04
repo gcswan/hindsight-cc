@@ -223,6 +223,16 @@ class TestSoftFailNeverPropagates:
             assert hindsight_api.reflect("bank", "q") is None
             assert hindsight_api.health() is False
 
+    def test_non_string_bank_id_does_not_raise(self):
+        """A malformed (non-str) bank_id must soft-fail, not raise out of the call."""
+        with patch(
+            "hindsight_api.urllib.request.urlopen",
+            side_effect=OSError("down"),
+        ):
+            assert hindsight_api.retain(None, "c") is None
+            assert hindsight_api.recall(None, "q") == []
+            assert hindsight_api.reflect(None, "q") is None
+
 
 class TestBaseUrlOverride:
     def test_env_override_is_honored(self):

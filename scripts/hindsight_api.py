@@ -43,8 +43,12 @@ def debug(msg: str) -> None:
 
 
 def _quote_bank(bank_id: str) -> str:
-    """URL-path-escape a bank ID (hyphen-safe; bank IDs need no real escaping)."""
-    return urllib.parse.quote(bank_id, safe="-")
+    """URL-path-escape a bank ID (hyphen-safe; bank IDs need no real escaping).
+
+    Coerces to str so a non-string bank_id can never raise out of a caller —
+    the module's soft-fail guarantee must hold even for malformed input.
+    """
+    return urllib.parse.quote(str(bank_id), safe="-")
 
 
 def _post_json(path: str, body: dict, timeout: float) -> Optional[dict]:
