@@ -86,6 +86,46 @@ class TestRetain:
             assert hindsight_api.retain("bank", "c") is None
 
 
+class TestRetainDetached:
+    """Tests for the fire-and-forget retain helper.
+
+    We never let os.fork return 0 here: that would send the test process down
+    the child path into os._exit(0) and kill pytest. We only exercise the
+    parent path (fork returns a fake pid) and the fork-unavailable fallback.
+    """
+
+    def test_parent_path_does_not_retain_in_process(self):
+        # fork returns a nonzero pid -> we are the "parent" -> return at once,
+        # without performing the retain in this process.
+        with patch("hindsight_api.os.fork", return_value=12345):
+            with patch("hindsight_api.retain") as mock_retain:
+                assert hindsight_api.retain_detached("bank", "content") is None
+        mock_retain.assert_not_called()
+
+    def test_fork_unavailable_falls_back_to_synchronous_retain(self):
+        with patch("hindsight_api.os.fork", side_effect=OSError("no fork")):
+            with patch("hindsight_api.retain", return_value={"ok": True}) as mock_retain:
+                assert hindsight_api.retain_detached("bank", "content") is None
+        mock_retain.assert_called_once()
+        args, kwargs = mock_retain.call_args
+        assert args[0] == "bank"
+        assert args[1] == "content"
+        assert kwargs.get("timeout") == 10.0
+
+    def test_fork_unavailable_and_sync_retain_raising_does_not_propagate(self):
+        with patch("hindsight_api.os.fork", side_effect=OSError("no fork")):
+            with patch("hindsight_api.retain", side_effect=RuntimeError("boom")):
+                # Must soft-fail: no exception escapes.
+                assert hindsight_api.retain_detached("bank", "content") is None
+
+    def test_context_forwarded_in_fallback(self):
+        with patch("hindsight_api.os.fork", side_effect=OSError("no fork")):
+            with patch("hindsight_api.retain") as mock_retain:
+                hindsight_api.retain_detached("bank", "c", context="ctx")
+        _, kwargs = mock_retain.call_args
+        assert kwargs.get("context") == "ctx"
+
+
 class TestRecall:
     def test_url_and_body_and_results(self):
         payload = {"results": [{"id": "1", "text": "memory one"}], "extra": 1}

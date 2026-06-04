@@ -103,6 +103,69 @@ def retain(
     return _post_json(path, body, timeout)
 
 
+def retain_detached(
+    bank_id: str,
+    content: str,
+    *,
+    context: Optional[str] = None,
+) -> None:
+    """
+    Fire-and-forget retain: return INSTANTLY, never block the caller.
+
+    Forks a child process that detaches via os.setsid() (new session, so it
+    outlives the short-lived hook process) and performs the actual network
+    retain with a generous timeout. The parent returns immediately and does NOT
+    wait on the child. The child re-parents to init after the hook exits, so it
+    is reaped there -- no zombie accumulates for our short-lived hook process.
+
+    IMPORTANT: the caller MUST fully read stdin and build `content` BEFORE
+    calling this, because after the fork the child must not touch stdin.
+
+    Soft-fails completely: if os.fork is unavailable or raises (e.g. a platform
+    without fork), falls back to a bounded synchronous retain. No exception ever
+    escapes this function.
+    """
+    try:
+        pid = os.fork()
+    except Exception as e:
+        # No fork available (or it failed): do a bounded synchronous retain so
+        # we still attempt to store the memory without hanging the caller.
+        debug(f"retain_detached: fork unavailable ({type(e).__name__}: {e}); "
+              "falling back to synchronous retain")
+        try:
+            retain(bank_id, content, context=context, async_=True, timeout=10.0)
+        except Exception as inner:
+            debug(f"retain_detached: synchronous fallback failed: "
+                  f"{type(inner).__name__}: {inner}")
+        return
+
+    if pid != 0:
+        # Parent: return immediately, do not wait on the child.
+        debug(f"retain_detached: detached retain to child pid {pid}")
+        return
+
+    # Child: detach, perform the retain, and exit -- unconditionally, so we can
+    # never fall through into the caller's post-fork code (double execution).
+    try:
+        try:
+            os.setsid()
+        except Exception:
+            pass
+        # Redirect inherited stdout/stderr to /dev/null: this hook's stdout may
+        # be injected into the prompt, and the child must contribute nothing.
+        try:
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+        except Exception:
+            pass
+        retain(bank_id, content, context=context, async_=True, timeout=30.0)
+    except Exception:
+        pass
+    finally:
+        os._exit(0)
+
+
 def recall(
     bank_id: str,
     query: str,

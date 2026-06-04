@@ -2,6 +2,8 @@
 import json
 import os
 import sys
+
+import hindsight_api
 from bank_utils import get_bank_id
 
 DEBUG = os.environ.get("HINDSIGHT_DEBUG", "").lower() in ("1", "true", "yes")
@@ -35,26 +37,21 @@ def main():
     debug(f"prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
     debug(f"Query length: {len(prompt)} chars")
 
-    try:
-        from hindsight_client import Hindsight
+    # recall() is hard-bounded at 2.5s and soft-fails to [] -- this is the only
+    # step the user waits on.
+    results = hindsight_api.recall(bank_id, prompt, budget="low", timeout=2.5)
 
-        debug("Connecting to Hindsight server")
-        client = Hindsight(base_url="http://localhost:8888")
-        response = client.recall(bank_id=bank_id, query=prompt)
-        client.close()
+    memories = [
+        r["text"] for r in results if isinstance(r, dict) and r.get("text")
+    ]
+    debug(f"Found {len(memories)} memories")
 
-        memories = [r.text for r in response.results]
-        debug(f"Found {len(memories)} memories")
-        if memories:
-            memory_block = "<hindsight-memories>\n" + "\n".join(memories) + "\n</hindsight-memories>"
-            print(memory_block)
-            debug("Injected memories into prompt")
-        else:
-            debug("No relevant memories found")
-    except Exception as e:
-        debug(f"Failed to recall memories: {e}")
-        # Silently fail if Hindsight is unavailable
-        pass
+    if memories:
+        memory_block = "<hindsight-memories>\n" + "\n".join(memories) + "\n</hindsight-memories>"
+        print(memory_block)
+        debug("Injected memories into prompt")
+    else:
+        debug("No relevant memories found")
 
 
 if __name__ == "__main__":
