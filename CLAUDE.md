@@ -8,13 +8,13 @@ This is a Claude Code plugin that provides persistent memory across conversation
 
 ## Setup and Installation
 
-```bash
-./scripts/install-dependencies.sh
-```
+The plugin runtime is stdlib-only. Hooks run under the system `python3` (Python 3.x on `PATH`, macOS/Linux) and import only the standard library plus the bundled `scripts/hindsight_api.py` REST client. There is no virtualenv to create and no third-party package (`hindsight-client`) to install at runtime.
 
-This creates a Python virtual environment in `scripts/.venv`, installs dependencies (hindsight-client), and makes scripts executable. The script short-circuits if already set up.
+First-run path: invoke the `/hindsight-cc:setup` slash command. It is a wizard that asks for an LLM provider/model/API key/base URL and writes `~/.config/hindsight-cc/config.env`, which `ensure-hindsight.sh` reads when it creates the Hindsight container.
 
-**Required environment variable**: `HINDSIGHT_API_LLM_API_KEY` must be set for Hindsight's LLM operations.
+`scripts/install-dependencies.sh` still exists for dev convenience (creating `scripts/.venv` for tests/lint/typecheck) but is NOT wired into any hook.
+
+LLM credentials: the Hindsight server needs an LLM configured for its memory operations. The value is resolved with precedence `explicit env var > ~/.config/hindsight-cc/config.env > built-in default`. Cloud providers (OpenAI, Anthropic, Gemini, Groq) need an API key (`HINDSIGHT_API_LLM_API_KEY`); local providers (Ollama, LM Studio) need a base URL instead and no key.
 
 ## Architecture
 
@@ -22,11 +22,11 @@ This creates a Python virtual environment in `scripts/.venv`, installs dependenc
 
 The plugin operates through Claude Code hooks defined in `hooks/hooks.json`:
 
-1. **SessionStart**: Runs `scripts/install-dependencies.sh` (installs deps if needed) then `scripts/ensure-hindsight.sh` (starts Docker container)
+1. **SessionStart**: Runs `scripts/ensure-hindsight.sh` (health-probe-first: reuses any already-running server, otherwise starts the Docker container)
 2. **UserPromptSubmit**: Sequentially runs:
-   - `scripts/retain-prompt.py` - Stores the user's prompt in the memory bank
-   - `scripts/inject-memories.py` - Queries for relevant memories and injects them into the prompt
-3. **Stop**: Runs `scripts/retain-transcript.py` to store the conversation transcript segment
+   - `scripts/retain-prompt.py` - Stores the user's prompt in the memory bank (fire-and-forget, non-blocking)
+   - `scripts/inject-memories.py` - Queries for relevant memories and injects them into the prompt (injection is enabled; recall is hard-bounded at ~2.5s and soft-fails to no injection)
+3. **Stop**: Runs `scripts/retain-transcript.py` to store the conversation transcript segment (fire-and-forget, non-blocking)
 
 ### Memory Bank Isolation
 
@@ -44,11 +44,11 @@ This ensures working on the same repository from different paths shares the same
 
 ### Hindsight Integration
 
-- **Server**: Runs in Docker container `hindsight-cc`
+- **Server**: Runs in Docker container `hindsight` (shared with the sibling pi-ndsight project — same `~/hindsight-data` volume and same `claude-code--` bank prefix, so memories are shared between them). `ensure-hindsight.sh` performs a one-time migration off the old `hindsight-cc` container name.
 - **API endpoint**: http://localhost:8888
 - **UI**: http://localhost:9999
 - **Data storage**: `~/hindsight-data/`
-- **Python client**: Uses `hindsight-client` package (≥0.1.16)
+- **Client**: Stdlib-only REST client `scripts/hindsight_api.py` (urllib/json) — no `hindsight-client` dependency
 
 ### Memory Injection Format
 
@@ -64,15 +64,17 @@ memory text 2
 
 All scripts follow a pattern of silently failing if Hindsight is unavailable. Set `HINDSIGHT_DEBUG=1` to enable verbose logging to stderr.
 
-- `scripts/bank_utils.py` - Shared utility module for bank ID generation (git-based with path fallback)
-- `scripts/ensure-hindsight.sh` - Checks for and starts Hindsight Docker container
-- `scripts/retain-prompt.py` - Stores user prompts via `client.retain()`
-- `scripts/inject-memories.py` - Queries and injects relevant memories via `client.recall()`
+- `scripts/hindsight_api.py` - Stdlib-only REST client (urllib/json) wrapping the Hindsight endpoints; all functions soft-fail so a prompt is never interrupted by a memory error
+- `scripts/bank_utils.py` - Shared utilities for bank ID generation (git-based with path fallback) and `extract_prompt` (normalizes the hook stdin payload)
+- `scripts/ensure-hindsight.sh` - Health-probe-first check that reuses or starts the Hindsight Docker container; reads `config.env` at container-create time
+- `scripts/retain-prompt.py` - Stores user prompts via `hindsight_api.retain_detached()`
+- `scripts/inject-memories.py` - Queries and injects relevant memories via `hindsight_api.recall()`
 - `scripts/retain-transcript.py` - Stores conversation transcript segments from the last user message onwards
+- `scripts/reflect.py` - Backs the `/hindsight-cc:reflect` command (AI-assisted decision support)
 - `scripts/search-memories.py` - Manual search utility for testing
 - `scripts/get-status.py` - Status checking utility
 
-All Python scripts are executed via the venv: `${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3`
+Hook and CLI scripts are run by the system `python3` directly, e.g. `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/...`. No virtualenv is used at runtime.
 
 ### Debug Logging
 
@@ -80,12 +82,14 @@ All hook scripts support debug logging via the `HINDSIGHT_DEBUG` environment var
 
 ## Slash Commands
 
-Two user-invocable commands are defined in `commands/`:
+User-invocable commands are defined in `commands/`:
 
+- `/hindsight-cc:setup` - First-run wizard: configure the LLM provider/model/key/base URL and write `~/.config/hindsight-cc/config.env`
 - `/hindsight-cc:memory-search <query>` - Search the memory bank
 - `/hindsight-cc:memory-status` - Check server and bank status
+- `/hindsight-cc:reflect` - AI-assisted decision support over past context
 
-Both commands use the `Bash` tool and are documented in markdown files.
+The commands are documented in markdown files in `commands/`.
 
 ## Troubleshooting
 
@@ -96,8 +100,8 @@ export HINDSIGHT_DEBUG=1
 
 Check Docker container:
 ```bash
-docker logs hindsight-cc
-docker ps -f name=hindsight-cc
+docker logs hindsight
+docker ps -f name=hindsight
 ```
 
 Check server health:
@@ -107,5 +111,5 @@ curl http://localhost:8888/health
 
 Restart server:
 ```bash
-docker restart hindsight-cc
+docker restart hindsight
 ```
