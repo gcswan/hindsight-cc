@@ -122,18 +122,24 @@ def retain_detached(
     calling this, because after the fork the child must not touch stdin.
 
     Soft-fails completely: if os.fork is unavailable or raises (e.g. a platform
-    without fork), falls back to a bounded synchronous retain. No exception ever
-    escapes this function.
+    without fork), falls back to a *bounded but synchronous* retain — note this
+    fallback briefly blocks the caller (a UserPromptSubmit hook is on the user's
+    critical path), so the timeout is kept short. fork() exists on all macOS and
+    Linux targets, so the fallback is rare.
+
+    The child performs only stdlib networking against the local server before
+    exiting; it never calls back into higher-level frameworks, which keeps it
+    clear of the macOS fork-without-exec CoreFoundation abort.
     """
     try:
         pid = os.fork()
     except Exception as e:
-        # No fork available (or it failed): do a bounded synchronous retain so
-        # we still attempt to store the memory without hanging the caller.
+        # No fork available (or it failed): do a short bounded synchronous retain
+        # so we still attempt to store the memory without hanging the caller.
         debug(f"retain_detached: fork unavailable ({type(e).__name__}: {e}); "
               "falling back to synchronous retain")
         try:
-            retain(bank_id, content, context=context, async_=True, timeout=10.0)
+            retain(bank_id, content, context=context, async_=True, timeout=2.0)
         except Exception as inner:
             debug(f"retain_detached: synchronous fallback failed: "
                   f"{type(inner).__name__}: {inner}")

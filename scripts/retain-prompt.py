@@ -4,7 +4,7 @@ import os
 import sys
 
 import hindsight_api
-from bank_utils import get_bank_id
+from bank_utils import extract_prompt, get_bank_id
 
 DEBUG = os.environ.get("HINDSIGHT_DEBUG", "").lower() in ("1", "true", "yes")
 
@@ -26,14 +26,7 @@ def main():
         debug(f"Failed to parse input: {e}")
         return
 
-    content = input_data.get("prompt", "")
-    if isinstance(content, list):
-        content = "\n".join(
-            part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
-        ).strip()
-    elif not isinstance(content, str):
-        content = str(content)
-
+    content = extract_prompt(input_data)
     debug(f"Content length: {len(content)} chars")
 
     # Read all of stdin and build `content` BEFORE detaching: the child must

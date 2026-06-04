@@ -110,7 +110,7 @@ class TestRetainDetached:
         args, kwargs = mock_retain.call_args
         assert args[0] == "bank"
         assert args[1] == "content"
-        assert kwargs.get("timeout") == 10.0
+        assert kwargs.get("timeout") == 2.0
 
     def test_fork_unavailable_and_sync_retain_raising_does_not_propagate(self):
         with patch("hindsight_api.os.fork", side_effect=OSError("no fork")):

@@ -211,3 +211,31 @@ def get_bank_id(debug_callback: Optional[Callable[[str], None]] = None) -> str:
 
     # Ensure lowercase for consistency
     return result.lower()
+
+
+def extract_prompt(input_data: dict) -> str:
+    """
+    Extract the user prompt text from a Claude Code hook's stdin payload.
+
+    The hook input's "prompt" field may be a plain string or a list of content
+    parts (each a dict with "type"/"text"); both shapes are normalized to a
+    single string. This is external-format parsing shared by the
+    UserPromptSubmit hooks, so it must change in lockstep if the input shape
+    changes — hence one helper rather than duplicated logic per script.
+
+    Args:
+        input_data: Parsed JSON object from the hook's stdin.
+
+    Returns:
+        The prompt as a string ("" if absent).
+    """
+    prompt = input_data.get("prompt", "")
+    if isinstance(prompt, list):
+        return "\n".join(
+            part.get("text", "")
+            for part in prompt
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+    if not isinstance(prompt, str):
+        return str(prompt)
+    return prompt

@@ -4,7 +4,7 @@ import os
 import sys
 
 import hindsight_api
-from bank_utils import get_bank_id
+from bank_utils import extract_prompt, get_bank_id
 
 DEBUG = os.environ.get("HINDSIGHT_DEBUG", "").lower() in ("1", "true", "yes")
 
@@ -26,14 +26,7 @@ def main():
         debug(f"Failed to parse input: {e}")
         return
 
-    prompt = input_data.get("prompt", "")
-    if isinstance(prompt, list):
-        prompt = "\n".join(
-            part.get("text", "") for part in prompt if isinstance(part, dict) and part.get("type") == "text"
-        ).strip()
-    elif not isinstance(prompt, str):
-        prompt = str(prompt)
-
+    prompt = extract_prompt(input_data)
     debug(f"prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
     debug(f"Query length: {len(prompt)} chars")
 
