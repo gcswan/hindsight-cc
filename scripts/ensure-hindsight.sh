@@ -119,13 +119,15 @@ resolve_config() {
 
 # require_api_key
 # Validates the EFFECTIVE key (env or config), not just the env var. Callers
-# must run resolve_config() first.
+# must run resolve_config() first. Local providers (Ollama, LM Studio) talk to a
+# custom endpoint set via HINDSIGHT_API_LLM_BASE_URL and need no key, so a
+# resolved base URL also satisfies this check.
 require_api_key() {
-	if [ -n "$EFF_API_KEY" ]; then
+	if [ -n "$EFF_API_KEY" ] || [ -n "$EFF_BASE_URL" ]; then
 		return 0
 	fi
 
-	echo "Error: HINDSIGHT_API_LLM_API_KEY is required before starting Hindsight" >&2
+	echo "Error: HINDSIGHT_API_LLM_API_KEY is required before starting Hindsight (or set HINDSIGHT_API_LLM_BASE_URL for a local provider)" >&2
 	return 1
 }
 
@@ -148,9 +150,15 @@ create_container() {
 	debug "Starting new container with image ${HINDSIGHT_IMAGE}"
 	debug "Starting Hindsight with model: ${EFF_MODEL}"
 
-	# Pass an optional LLM base URL (for local providers) only when resolved;
-	# never pass an empty one. Accumulate via positional params to stay DRY.
+	# Pass the optional API key and base URL only when resolved; never pass an
+	# empty one. Omitting an empty key matters: a container created with an empty
+	# HINDSIGHT_API_LLM_API_KEY= env would be flagged as "missing key" on the next
+	# run and recreated every session (an infinite loop for local providers, which
+	# legitimately have no key). Accumulate via positional params to stay DRY.
 	set --
+	if [ -n "$EFF_API_KEY" ]; then
+		set -- "$@" -e HINDSIGHT_API_LLM_API_KEY="$EFF_API_KEY"
+	fi
 	if [ -n "$EFF_BASE_URL" ]; then
 		set -- "$@" -e HINDSIGHT_API_LLM_BASE_URL="$EFF_BASE_URL"
 	fi
@@ -161,7 +169,6 @@ create_container() {
 	docker run -d --name "$CONTAINER_NAME" \
 		--shm-size=2g \
 		-p 8888:8888 -p 9999:9999 \
-		-e HINDSIGHT_API_LLM_API_KEY="$EFF_API_KEY" \
 		-e HINDSIGHT_API_LLM_MODEL="$EFF_MODEL" \
 		-e HINDSIGHT_API_LLM_PROVIDER="$EFF_PROVIDER" \
 		"$@" \

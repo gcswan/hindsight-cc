@@ -362,6 +362,53 @@ flow_test_migration_noop_when_both_exist() {
 	rm -rf "$tmp"
 }
 
+flow_test_local_provider_no_key() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_f.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	marker="$tmp/started.marker"
+
+	# A local provider (Ollama) sets a base URL and NO API key. The container
+	# must still be created: require_api_key is satisfied by the base URL, and
+	# create_container must NOT pass an (empty) HINDSIGHT_API_LLM_API_KEY env
+	# (which would otherwise trigger a recreate loop next session).
+	out=$(
+		unset HINDSIGHT_API_LLM_API_KEY
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$marker" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			HINDSIGHT_API_LLM_PROVIDER="ollama" \
+			HINDSIGHT_API_LLM_BASE_URL="http://localhost:11434/v1" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(f): local provider (no key) creates container" "0" "$rc"
+	if log_has "run -d --name hindsight " "$log"; then
+		pass "flow(f): container created for local provider without a key"
+	else
+		fail "flow(f): expected 'docker run -d --name hindsight'"
+	fi
+	if log_has "HINDSIGHT_API_LLM_BASE_URL=http://localhost:11434/v1" "$log"; then
+		pass "flow(f): base URL passed through to container"
+	else
+		fail "flow(f): expected base URL env on docker run"
+	fi
+	if log_has "HINDSIGHT_API_LLM_API_KEY" "$log"; then
+		fail "flow(f): must NOT pass an API key env for a keyless local provider"
+	else
+		pass "flow(f): no API key env on docker run for local provider"
+	fi
+
+	rm -rf "$tmp"
+}
+
 flow_test_no_docker() {
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_c.XXXXXX")
 	# Empty shim dir as the ONLY PATH so `command -v docker` fails. The script
@@ -388,6 +435,7 @@ flow_test_healthy_no_mutation
 flow_test_migration_then_create
 flow_test_recreate_on_missing_key
 flow_test_migration_noop_when_both_exist
+flow_test_local_provider_no_key
 flow_test_no_docker
 
 echo ""
