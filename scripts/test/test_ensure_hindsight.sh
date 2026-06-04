@@ -156,9 +156,19 @@ run)
 	[ -n "${FAKE_MARKER:-}" ] && : >"$FAKE_MARKER"
 	exit 0
 	;;
+start)
+	# Starting an existing container also brings the server up.
+	[ -n "${FAKE_MARKER:-}" ] && : >"$FAKE_MARKER"
+	exit 0
+	;;
 inspect)
-	# Pretend the container has a non-empty API key (not the recreate path).
-	echo "HINDSIGHT_API_LLM_API_KEY=present"
+	# Emit an EMPTY API key (the recreate path) when FAKE_MISSING_KEY=1,
+	# otherwise a present key (the docker-start path).
+	if [ "${FAKE_MISSING_KEY:-0}" = "1" ]; then
+		echo "HINDSIGHT_API_LLM_API_KEY="
+	else
+		echo "HINDSIGHT_API_LLM_API_KEY=present"
+	fi
 	exit 0
 	;;
 *)
@@ -273,6 +283,85 @@ flow_test_migration_then_create() {
 	rm -rf "$tmp"
 }
 
+flow_test_recreate_on_missing_key() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_d.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	marker="$tmp/started.marker"
+
+	# "hindsight" exists but its inspected env has an EMPTY API key, so the
+	# script must rm -f that container and recreate it. An effective key is
+	# supplied via env. This is the only path that fires the destructive
+	# recreate gated on container_missing_api_key + require_api_key.
+	out=$(
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$marker" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_MISSING_KEY=1 \
+			HINDSIGHT_API_LLM_API_KEY="test-key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(d): exits 0 after recreate+ready" "0" "$rc"
+	if log_has "rm -f hsid456" "$log"; then
+		pass "flow(d): missing-key container is removed"
+	else
+		fail "flow(d): expected 'docker rm -f hsid456'"
+	fi
+	if log_has "run -d --name hindsight " "$log"; then
+		pass "flow(d): missing-key container is recreated"
+	else
+		fail "flow(d): expected 'docker run -d --name hindsight'"
+	fi
+
+	rm -rf "$tmp"
+}
+
+flow_test_migration_noop_when_both_exist() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_e.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	marker="$tmp/started.marker"
+
+	# Both legacy and new containers exist: migration must NOT remove the legacy
+	# one (the self-limiting invariant). Health fails initially; the existing
+	# "hindsight" has a key, so it is simply started.
+	out=$(
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$marker" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=1 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(e): exits 0 after start" "0" "$rc"
+	if log_has "rm -f hindsight-cc" "$log"; then
+		fail "flow(e): legacy container must NOT be removed when 'hindsight' exists"
+	else
+		pass "flow(e): migration no-ops when both containers exist"
+	fi
+	if log_has "start hsid456" "$log"; then
+		pass "flow(e): existing 'hindsight' container is started"
+	else
+		fail "flow(e): expected 'docker start hsid456'"
+	fi
+
+	rm -rf "$tmp"
+}
+
 flow_test_no_docker() {
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_c.XXXXXX")
 	# Empty shim dir as the ONLY PATH so `command -v docker` fails. The script
@@ -297,6 +386,8 @@ config_parser_tests
 echo "=== flow tests ==="
 flow_test_healthy_no_mutation
 flow_test_migration_then_create
+flow_test_recreate_on_missing_key
+flow_test_migration_noop_when_both_exist
 flow_test_no_docker
 
 echo ""

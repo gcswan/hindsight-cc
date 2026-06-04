@@ -130,14 +130,14 @@ require_api_key() {
 }
 
 container_missing_api_key() {
-	container_id="$1"
-	container_env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" 2>/dev/null)
+	cmk_id="$1"
+	cmk_env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cmk_id" 2>/dev/null)
 
-	if [ -z "$container_env" ]; then
+	if [ -z "$cmk_env" ]; then
 		return 1
 	fi
 
-	echo "$container_env" | grep -q '^HINDSIGHT_API_LLM_API_KEY=$'
+	echo "$cmk_env" | grep -q '^HINDSIGHT_API_LLM_API_KEY=$'
 }
 
 create_container() {
@@ -194,12 +194,13 @@ server_healthy() {
 }
 
 # wait_for_ready
-# Polls health up to 30s after a (re)create; warns and returns 1 if it never
-# comes up.
+# Polls health up to 25s after a (re)create; warns and returns 1 if it never
+# comes up. Capped below the 30s SessionStart hook timeout so the hook returns
+# its own warning rather than being killed at the boundary.
 wait_for_ready() {
-	debug "Waiting for server to be ready (up to 30 seconds)"
+	debug "Waiting for server to be ready (up to 25 seconds)"
 	i=1
-	while [ "$i" -le 30 ]; do
+	while [ "$i" -le 25 ]; do
 		if curl -s --connect-timeout 1 "$HEALTH_URL" >/dev/null 2>&1; then
 			debug "Server ready after $i seconds"
 			return 0
@@ -208,8 +209,8 @@ wait_for_ready() {
 		i=$((i + 1))
 	done
 
-	debug "Server did not start within 30 seconds"
-	echo "Warning: Hindsight server did not start within 30 seconds" >&2
+	debug "Server did not start within 25 seconds"
+	echo "Warning: Hindsight server did not start within 25 seconds" >&2
 	return 1
 }
 
