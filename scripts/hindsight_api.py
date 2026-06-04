@@ -42,6 +42,23 @@ def debug(msg: str) -> None:
         print(f"{_DEBUG_PREFIX} {msg}", file=sys.stderr)
 
 
+def _detached_log_fd(fallback_fd: int) -> int:
+    """
+    Open (append) the detached-retain debug log and return its fd.
+
+    Used only when HINDSIGHT_DEBUG is on, to capture the forked child's stderr
+    (which is otherwise sent to /dev/null) so a failing detached retain stays
+    diagnosable. Returns fallback_fd (typically /dev/null) on any failure.
+    """
+    try:
+        log_dir = os.path.join(os.path.expanduser("~"), ".cache", "hindsight-cc")
+        os.makedirs(log_dir, exist_ok=True)
+        path = os.path.join(log_dir, "detached-retain.log")
+        return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except Exception:
+        return fallback_fd
+
+
 def _quote_bank(bank_id: str) -> str:
     """URL-path-escape a bank ID (hyphen-safe; bank IDs need no real escaping).
 
@@ -127,9 +144,12 @@ def retain_detached(
     critical path), so the timeout is kept short. fork() exists on all macOS and
     Linux targets, so the fallback is rare.
 
-    The child performs only stdlib networking against the local server before
-    exiting; it never calls back into higher-level frameworks, which keeps it
-    clear of the macOS fork-without-exec CoreFoundation abort.
+    macOS fork-without-exec safety: forking and then using a higher-level
+    framework (urllib eventually touches CoreFoundation via proxy lookup) can
+    trip the CoreFoundation fork-safety abort — but ONLY when the parent is
+    multi-threaded at fork time. Claude Code spawns a fresh single-threaded
+    python3 per hook invocation, so at the moment we fork there are no other
+    threads and the abort cannot fire.
     """
     try:
         pid = os.fork()
@@ -157,14 +177,18 @@ def retain_detached(
             os.setsid()
         except Exception:
             pass
-        # Redirect inherited stdout/stderr to /dev/null: this hook's stdout may
-        # be injected into the prompt, and the child must contribute nothing.
+        # stdout MUST be silenced: the hook's stdout is injected into the prompt
+        # and the detached child must contribute nothing to it. stderr carries
+        # debug logging — when HINDSIGHT_DEBUG is on, route it to a log file so
+        # the (otherwise invisible) detached retain stays diagnosable; otherwise
+        # silence it too.
         try:
             devnull = os.open(os.devnull, os.O_RDWR)
             os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
+            os.dup2(_detached_log_fd(devnull) if _debug_enabled() else devnull, 2)
         except Exception:
             pass
+        debug("retain_detached: child performing detached retain")
         retain(bank_id, content, context=context, async_=True, timeout=30.0)
     except Exception:
         pass

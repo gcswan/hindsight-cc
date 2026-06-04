@@ -179,7 +179,7 @@ variable or via `~/.config/hindsight-cc/config.env` (written by
 | Variable                    | Description                                  | Default                                 |
 | --------------------------- | -------------------------------------------- | --------------------------------------- |
 | `HINDSIGHT_API_LLM_API_KEY` | API key for Hindsight LLM operations         | required for cloud providers; omit for local (Ollama, LM Studio) |
-| `HINDSIGHT_API_LLM_MODEL`   | LLM model for Hindsight                      | `gpt-4o-mini`                           |
+| `HINDSIGHT_API_LLM_MODEL`   | LLM model for Hindsight                      | `gpt-5-nano`                            |
 | `HINDSIGHT_API_LLM_BASE_URL`| LLM base URL (local providers / custom endpoints) | (unset)                            |
 | `HINDSIGHT_DEBUG`           | Enable debug logging (`1`, `true`, or `yes`) | (disabled)                              |
 | `HINDSIGHT_IMAGE`           | Docker image for Hindsight server            | `ghcr.io/vectorize-io/hindsight:0.7.2` |

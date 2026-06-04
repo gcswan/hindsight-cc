@@ -166,14 +166,21 @@ create_container() {
 	# Embedded Postgres builds a to_tsvector GENERATED column during migrations,
 	# needing >500MB shared memory; Docker's default 64MB /dev/shm causes DiskFull
 	# crashes on first start/upgrade.
-	docker run -d --name "$CONTAINER_NAME" \
+	# Capture combined output (instead of discarding it) so that, on failure,
+	# the cause (port already bound, image pull error, OOM, bad flag) is
+	# recoverable via HINDSIGHT_DEBUG rather than silently lost. The success
+	# stdout (the container id) is unused, so capturing it is harmless.
+	run_out=$(docker run -d --name "$CONTAINER_NAME" \
 		--shm-size=2g \
 		-p 8888:8888 -p 9999:9999 \
 		-e HINDSIGHT_API_LLM_MODEL="$EFF_MODEL" \
 		-e HINDSIGHT_API_LLM_PROVIDER="$EFF_PROVIDER" \
 		"$@" \
 		-v "$HOME/hindsight-data:/home/hindsight/.pg0" \
-		"$HINDSIGHT_IMAGE" >/dev/null 2>&1
+		"$HINDSIGHT_IMAGE" 2>&1)
+	run_rc=$?
+	[ "$run_rc" -ne 0 ] && debug "docker run failed (rc=$run_rc): $run_out"
+	return "$run_rc"
 }
 
 # migrate_legacy_container
@@ -241,7 +248,14 @@ create_or_recreate() {
 			create_container
 		else
 			debug "Starting existing container"
-			docker start "$container_id" >/dev/null 2>&1
+			start_out=$(docker start "$container_id" 2>&1)
+			start_rc=$?
+			# Use if/fi (not `&& debug`): as the function's last command, a
+			# `[ rc -ne 0 ] && ...` would itself return 1 on a SUCCESSFUL start
+			# (the test is false), making create_or_recreate report failure.
+			if [ "$start_rc" -ne 0 ]; then
+				debug "docker start failed (rc=$start_rc): $start_out"
+			fi
 		fi
 	else
 		debug "No existing container, creating new one"

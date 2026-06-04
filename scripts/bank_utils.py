@@ -48,7 +48,9 @@ def get_project_dir() -> str:
     return os.getcwd()
 
 
-def get_git_remote_id(project_dir: str) -> Optional[str]:
+def get_git_remote_id(
+    project_dir: str, debug_callback: Optional[Callable[[str], None]] = None
+) -> Optional[str]:
     """
     Extract owner/repo from git remote URL.
 
@@ -116,8 +118,12 @@ def get_git_remote_id(project_dir: str) -> Optional[str]:
     ):
         # Git not available, not in git repo, or timeout
         return None
-    except Exception:
-        # Any other error - fail gracefully
+    except Exception as e:
+        # Unexpected error (e.g. a regex/logic bug). Fail gracefully so the bank
+        # ID still resolves, but log it: silently returning None here switches
+        # the caller to a *different* (path-based) bank, which is worth knowing.
+        if debug_callback:
+            debug_callback(f"get_git_remote_id: unexpected error: {type(e).__name__}: {e}")
         return None
 
 
@@ -199,7 +205,7 @@ def get_bank_id(debug_callback: Optional[Callable[[str], None]] = None) -> str:
         pass
 
     # Try git-based ID first
-    git_id = get_git_remote_id(project_dir)
+    git_id = get_git_remote_id(project_dir, debug_callback=debug_callback)
     if git_id:
         debug(f"Using git-based ID: {git_id}")
         result = f"claude-code--{git_id}"
