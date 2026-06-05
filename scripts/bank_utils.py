@@ -115,8 +115,12 @@ def get_git_remote_id(
         subprocess.TimeoutExpired,
         subprocess.CalledProcessError,
         FileNotFoundError,
-    ):
-        # Git not available, not in git repo, or timeout
+    ) as e:
+        # Git not available, not in git repo, or timeout. Log it like the
+        # unexpected-error branch below: a timeout in particular switches the
+        # caller to a *different* (path-based) bank, which is worth knowing.
+        if debug_callback:
+            debug_callback(f"get_git_remote_id: git unavailable/timeout: {type(e).__name__}: {e}")
         return None
     except Exception as e:
         # Unexpected error (e.g. a regex/logic bug). Fail gracefully so the bank

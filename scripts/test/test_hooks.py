@@ -301,6 +301,40 @@ class TestRetainTranscript:
         assert proc.returncode == 0
         assert proc.stdout == ""
 
+    def test_non_dict_transcript_lines_do_not_crash(self, tmp_path, stub_server):
+        """A JSONL line that decodes to a scalar/list must not raise AttributeError.
+
+        The real user message still reaches the server; the non-dict lines are
+        skipped rather than crashing the Stop hook.
+        """
+        base_url, _ = stub_server
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            5,
+            "a bare string",
+            [],
+            {"message": "not-a-dict"},
+            {"message": {"role": "user", "content": "the real question"}},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(path)}, base_url
+        )
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None
+        assert "the real question" in match[1]["items"][0]["content"]
+
+    def test_unreadable_transcript_path_exits_zero(self, tmp_path):
+        """A transcript_path that is a directory (IsADirectoryError -> OSError)
+        must soft-fail, not propagate out of the Stop hook."""
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(tmp_path)}
+        )
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+
 
 def _load_script_module(filename, mod_name):
     """Load a hyphenated script (e.g. inject-memories.py) via importlib."""

@@ -204,27 +204,33 @@ migrate_legacy_container() {
 # server_healthy
 # Returns 0 if the health endpoint answers.
 server_healthy() {
-	curl -s --connect-timeout 2 "$HEALTH_URL" >/dev/null 2>&1
+	# --max-time bounds the whole request (connect + read), not just the TCP
+	# connect, so a server that accepts the connection but stalls on /health
+	# can't hang the probe.
+	curl -s --connect-timeout 2 --max-time 3 "$HEALTH_URL" >/dev/null 2>&1
 }
 
 # wait_for_ready
-# Polls health up to 25s after a (re)create; warns and returns 1 if it never
-# comes up. Capped below the 30s SessionStart hook timeout so the hook returns
-# its own warning rather than being killed at the boundary.
+# Polls health until the server answers or a ~24s wall-clock deadline passes;
+# warns and returns 1 if it never comes up. The deadline (not an attempt count)
+# is what caps the wait below the 30s SessionStart hook timeout, so the hook
+# returns its own warning rather than being killed at the boundary. --max-time
+# bounds each probe's connect+read, so a server that binds the port but stalls
+# on /health (the slow embedded-Postgres migration case) can't drag a single
+# attempt past the budget.
 wait_for_ready() {
-	debug "Waiting for server to be ready (up to 25 seconds)"
-	i=1
-	while [ "$i" -le 25 ]; do
-		if curl -s --connect-timeout 1 "$HEALTH_URL" >/dev/null 2>&1; then
-			debug "Server ready after $i seconds"
+	debug "Waiting for server to be ready (up to ~24 seconds)"
+	wfr_deadline=$(($(date +%s) + 24))
+	while [ "$(date +%s)" -lt "$wfr_deadline" ]; do
+		if curl -s --connect-timeout 1 --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+			debug "Server ready"
 			return 0
 		fi
 		sleep 1
-		i=$((i + 1))
 	done
 
-	debug "Server did not start within 25 seconds"
-	echo "Warning: Hindsight server did not start within 25 seconds" >&2
+	debug "Server did not become ready within the ~24s deadline"
+	echo "Warning: Hindsight server did not start within ~24 seconds" >&2
 	return 1
 }
 

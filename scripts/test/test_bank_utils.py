@@ -194,6 +194,19 @@ class TestGetGitRemoteId:
             result = get_git_remote_id("/project")
             assert result is None
 
+    def test_git_timeout_invokes_debug_callback(self):
+        """A git timeout silently switches the caller to a path-based bank, so it
+        must log under debug for diagnosability (parity with the unexpected-error
+        branch)."""
+        messages = []
+        with patch(
+            "bank_utils.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 2)
+        ):
+            result = get_git_remote_id("/project", debug_callback=messages.append)
+
+        assert result is None
+        assert any("timeout" in m.lower() for m in messages)
+
     def test_returns_none_when_git_not_installed(self):
         """Returns None when git is not installed."""
         with patch("bank_utils.subprocess.run", side_effect=FileNotFoundError()):
