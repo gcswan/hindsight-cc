@@ -3,6 +3,8 @@ import argparse
 import json
 import os
 import sys
+
+import hindsight_api
 from bank_utils import get_bank_id
 
 DEBUG = os.environ.get("HINDSIGHT_DEBUG", "").lower() in ("1", "true", "yes")
@@ -59,45 +61,29 @@ def main():
     debug(f"Context: {args.context}")
     debug(f"Max tokens: {args.max_tokens}")
 
-    try:
-        from hindsight_client import Hindsight
+    result = hindsight_api.reflect(
+        bank_id,
+        args.query,
+        budget=args.budget,
+        context=args.context,
+        max_tokens=(args.max_tokens if args.max_tokens != 4096 else None),
+        response_schema=response_schema,
+    )
 
-        client = Hindsight(base_url="http://localhost:8888")
+    if result is None:
+        # Silent failure - reflect soft-fails to None; don't exit nonzero to
+        # match the other scripts' behavior.
+        debug("reflect returned None (server unavailable or error)")
+        print("Error reflecting: Hindsight reflection unavailable.", file=sys.stderr)
+        return
 
-        # Build kwargs for reflect call
-        kwargs = {
-            "bank_id": bank_id,
-            "query": args.query,
-            "budget": args.budget,
-        }
+    # Answer is in the "text" field (not "answer").
+    print(result.get("text", ""))
 
-        # Only add optional parameters if they're not None
-        if args.context is not None:
-            kwargs["context"] = args.context
-        if args.max_tokens != 4096:
-            kwargs["max_tokens"] = args.max_tokens
-        if response_schema is not None:
-            kwargs["response_schema"] = response_schema
-
-        debug(f"Calling reflect with: {kwargs}")
-        response = client.reflect(**kwargs)
-        client.close()
-
-        # Print the reflection output to stdout
-        if hasattr(response, "text"):
-            print(response.text)
-        elif isinstance(response, dict) and "text" in response:
-            print(response["text"])
-        elif isinstance(response, str):
-            print(response)
-        else:
-            # Fallback: print the response as-is
-            print(response)
-
-    except Exception as e:
-        debug(f"Failed to reflect: {e}")
-        print(f"Error reflecting: {e}", file=sys.stderr)
-        # Silent failure - don't exit with error code to match other scripts
+    structured = result.get("structured_output")
+    if structured:
+        print("\n--- Structured Output ---")
+        print(json.dumps(structured, indent=2))
 
 
 if __name__ == "__main__":

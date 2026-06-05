@@ -2,6 +2,8 @@
 import json
 import os
 import sys
+
+import hindsight_api
 from bank_utils import get_bank_id
 
 DEBUG = os.environ.get("HINDSIGHT_DEBUG", "").lower() in ("1", "true", "yes")
@@ -39,7 +41,10 @@ def main():
                 if line.strip():
                     messages.append(json.loads(line))
         debug(f"Read {len(messages)} messages from transcript")
-    except (FileNotFoundError, json.JSONDecodeError) as e:
+    except (OSError, ValueError) as e:
+        # OSError covers FileNotFoundError/PermissionError/IsADirectoryError;
+        # ValueError covers json.JSONDecodeError and UnicodeDecodeError (text-mode
+        # open hitting non-UTF-8 bytes). Soft-fail so the Stop hook never raises.
         debug(f"Failed to read transcript: {e}")
         return
 
@@ -50,7 +55,9 @@ def main():
     # Find the last user message index
     last_user_idx = -1
     for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("message", {}).get("role") == "user":
+        msg = messages[i]
+        inner = msg.get("message", {}) if isinstance(msg, dict) else {}
+        if isinstance(inner, dict) and inner.get("role") == "user":
             last_user_idx = i
             break
 
@@ -65,7 +72,11 @@ def main():
     # Format transcript section
     lines = []
     for msg in recent_messages:
+        if not isinstance(msg, dict):
+            continue
         inner = msg.get("message", {})
+        if not isinstance(inner, dict):
+            continue
         role = inner.get("role", "unknown")
         content = inner.get("content", "")
         if isinstance(content, list):
@@ -79,18 +90,10 @@ def main():
     transcript = "\n".join(lines)
     debug(f"Formatted transcript: {len(transcript)} chars")
 
-    try:
-        from hindsight_client import Hindsight
-
-        debug("Connecting to Hindsight server")
-        client = Hindsight(base_url="http://localhost:8888")
-        client.retain(bank_id=bank_id, content=transcript)
-        client.close()
-        debug("Successfully retained transcript")
-    except Exception as e:
-        debug(f"Failed to retain transcript: {e}")
-        # Silently fail if Hindsight is unavailable
-        pass
+    # `transcript` is fully built from stdin above before detaching; the child
+    # must not touch stdin. retain_detached returns instantly and soft-fails.
+    hindsight_api.retain_detached(bank_id, transcript)
+    debug("Dispatched detached retain")
 
 
 if __name__ == "__main__":

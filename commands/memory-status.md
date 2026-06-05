@@ -10,7 +10,7 @@ allowed-tools: Bash
 Run the following command to check the status of the Hindsight memory server and display information about the current project's memory bank:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3 ${CLAUDE_PLUGIN_ROOT}/scripts/get-status.py
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/get-status.py
 ```
 
 ## How To Handle Output

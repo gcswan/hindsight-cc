@@ -1,4 +1,6 @@
-hindsight-client>=0.1.16,<1.0.0
+# DEV-ONLY tooling (tests + lint/typecheck). The plugin RUNTIME needs no
+# third-party packages: hook and CLI scripts run on the system python3 stdlib
+# via scripts/hindsight_api.py. Nothing here is required to run the plugin.
 pytest>=7.0
 pyright==1.1.407
 ruff==0.14.10

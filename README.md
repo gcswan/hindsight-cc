@@ -1,6 +1,6 @@
 # hindsight-cc
 
-![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)
+![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Docker Required](https://img.shields.io/badge/docker-required-blue.svg)
 
@@ -8,24 +8,49 @@ A Claude Code plugin that provides persistent memory across conversations using 
 
 ## Installation
 
-**IMPORTANT**
-Set the LLM provider, model, and token in your environment before installing in
-claude code.
-
 Install directly from the GitHub marketplace:
 
 ```bash
 claude plugin add gcswan/hindsight-cc
 ```
 
-After installation, the first time you try to run Claude it will take longer
-than usual as it's installing dependencies.
+The plugin runtime is stdlib-only: its hooks run under your system `python3`
+(no virtualenv, no `pip install`). Nothing is installed on first run, so the
+first session is not slowed down by a dependency install.
 
 To verify installation:
 
 ```bash
 claude plugin list
 ```
+
+### First-Run Setup
+
+Configure the LLM provider Hindsight uses for its memory operations by running
+the setup wizard inside Claude Code:
+
+```text
+/hindsight-cc:setup
+```
+
+It asks for a provider, model, and (for cloud providers) an API key, then
+writes `~/.config/hindsight-cc/config.env`. The `ensure-hindsight.sh`
+container-startup script reads that file when it creates the Hindsight
+container, with precedence: explicit environment variable >
+`~/.config/hindsight-cc/config.env` > built-in default. Local providers
+(Ollama, LM Studio) need a base URL instead of an API key.
+
+#### First-run onboarding note
+
+On a brand-new machine, the very first Claude Code session may start *before*
+you have run `/hindsight-cc:setup` — so there is no API key configured yet and
+memory will not be active for that session. This is expected. Run
+`/hindsight-cc:setup` and then start a new session; the Hindsight container is
+created with your chosen provider and memory features come online.
+
+You can also set the provider via environment variables (instead of, or in
+addition to, the wizard) before starting Claude Code — see the examples under
+[Requirements](#requirements) below.
 
 ## Features
 
@@ -38,7 +63,14 @@ claude plugin list
 ## Requirements
 
 - Docker installed and running
-- Python 3.10+
+- A system `python3` on `PATH` (Python 3.10+; the repo pins 3.13 for dev). The
+  hooks call it directly — no virtualenv is created or used at runtime.
+
+The examples below show provider configuration via environment variables. The
+same values can be supplied through `~/.config/hindsight-cc/config.env` via
+`/hindsight-cc:setup`; the precedence is explicit env var > `config.env` >
+built-in default. Cloud providers need an API key; local providers (Ollama, LM
+Studio) need a base URL and no key.
 
 ```bash
 # Groq (recommended for fast inference)
@@ -84,14 +116,20 @@ export HINDSIGHT_API_LLM_MODEL=your-model-name
 
 Once installed, the plugin works automatically:
 
-1. **On session start**: Dependencies are installed and Hindsight server is started if not already running
+1. **On session start**: The Hindsight server is started if not already running (an already-running server is reused)
 2. **On each prompt**: Your prompt is stored, and relevant memories are injected
 3. **On session end**: The conversation transcript is stored
 
+Prompt and transcript retention are fire-and-forget (non-blocking). Memory
+injection runs a recall that is hard-bounded at ~2.5s and soft-fails to no
+injection, so a slow or unavailable server never holds up your prompt.
+
 ### Slash Commands
 
+- `/hindsight-cc:setup` - First-run wizard to configure the LLM provider and write `config.env`
 - `/hindsight-cc:memory-search <query>` - Search your project's memory bank
 - `/hindsight-cc:memory-status` - Check server status and bank info
+- `/hindsight-cc:reflect` - AI-assisted decision support over past context
 
 ## How It Works
 
@@ -113,11 +151,11 @@ This ensures working on the same repository from different paths shares the same
 
 ### Hook Flow
 
-1. **SessionStart**: Starts Hindsight server if not running
+1. **SessionStart**: Starts the shared Hindsight server if not running (reuses it if it is)
 2. **UserPromptSubmit**:
-   - Stores the prompt for future search
-   - Queries for relevant memories and injects them
-3. **Stop**: Stores the conversation transcript
+   - Stores the prompt for future search (fire-and-forget)
+   - Queries for relevant memories and injects them (recall bounded at ~2.5s)
+3. **Stop**: Stores the conversation transcript (fire-and-forget)
 
 ### Memory Format
 
@@ -134,16 +172,25 @@ memory text 2
 
 ### Environment Variables
 
+Each of the `HINDSIGHT_API_LLM_*` values can be set either as an environment
+variable or via `~/.config/hindsight-cc/config.env` (written by
+`/hindsight-cc:setup`), with precedence env var > `config.env` > default.
+
 | Variable                    | Description                                  | Default                                 |
 | --------------------------- | -------------------------------------------- | --------------------------------------- |
-| `HINDSIGHT_API_LLM_API_KEY` | API key for Hindsight LLM operations         | (required)                              |
-| `HINDSIGHT_API_LLM_MODEL`   | LLM model for Hindsight                      | `gpt-4o-mini`                           |
+| `HINDSIGHT_API_LLM_API_KEY` | API key for Hindsight LLM operations         | required for cloud providers; omit for local (Ollama, LM Studio) |
+| `HINDSIGHT_API_LLM_MODEL`   | LLM model for Hindsight                      | `gpt-5-nano`                            |
+| `HINDSIGHT_API_LLM_BASE_URL`| LLM base URL (local providers / custom endpoints) | (unset)                            |
 | `HINDSIGHT_DEBUG`           | Enable debug logging (`1`, `true`, or `yes`) | (disabled)                              |
 | `HINDSIGHT_IMAGE`           | Docker image for Hindsight server            | `ghcr.io/vectorize-io/hindsight:0.7.2` |
 
 ### Data Storage
 
-Memory data is stored in `~/hindsight-data/`.
+Memory data is stored in `~/hindsight-data/`. The server runs in a single
+shared Docker container named `hindsight`, shared with the sibling pi-ndsight
+project (same data volume and `claude-code--` bank prefix, so memories are
+shared between them). On first run after upgrading, `ensure-hindsight.sh`
+performs a one-time migration off the old `hindsight-cc` container name.
 
 ### Data Handling & Privacy
 
@@ -193,24 +240,27 @@ curl http://localhost:8888/health
 View container status:
 
 ```bash
-docker ps -f name=hindsight-cc
+docker ps -f name=hindsight
 ```
 
 Check container logs:
 
 ```bash
-docker logs hindsight-cc
+docker logs hindsight
 ```
 
 Restart the server:
 
 ```bash
-docker restart hindsight-cc
+docker restart hindsight
 ```
 
 ## Testing
 
-Run tests and checks from the repo root using the scripts venv:
+The plugin runtime needs no third-party packages, but tests/lint/typecheck use
+a dev-only virtualenv. Create it once with `./scripts/install-dependencies.sh`,
+then run checks from the repo root using that venv (this venv is for
+development only and is never used by the hooks at runtime):
 
 ```bash
 ./scripts/.venv/bin/pytest scripts/test

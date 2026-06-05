@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from bank_utils import (
+    extract_prompt,
     get_bank_id,
     get_git_remote_id,
     get_path_based_id,
@@ -193,11 +194,59 @@ class TestGetGitRemoteId:
             result = get_git_remote_id("/project")
             assert result is None
 
+    def test_git_timeout_invokes_debug_callback(self):
+        """A git timeout silently switches the caller to a path-based bank, so it
+        must log under debug for diagnosability (parity with the unexpected-error
+        branch)."""
+        messages = []
+        with patch(
+            "bank_utils.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 2)
+        ):
+            result = get_git_remote_id("/project", debug_callback=messages.append)
+
+        assert result is None
+        assert any("timeout" in m.lower() for m in messages)
+
     def test_returns_none_when_git_not_installed(self):
         """Returns None when git is not installed."""
         with patch("bank_utils.subprocess.run", side_effect=FileNotFoundError()):
             result = get_git_remote_id("/project")
             assert result is None
+
+    def test_unexpected_error_invokes_debug_callback(self):
+        """An unexpected (non-subprocess) error fires debug_callback and soft-fails."""
+        messages = []
+
+        # A ValueError is not in the handled subprocess-error tuple, so it falls
+        # through to the generic handler that invokes debug_callback.
+        with patch(
+            "bank_utils.subprocess.run", side_effect=ValueError("boom")
+        ):
+            result = get_git_remote_id("/project", debug_callback=messages.append)
+
+        assert result is None
+        assert any("unexpected error" in m for m in messages)
+
+
+class TestExtractPrompt:
+    """Tests for extract_prompt() function."""
+
+    def test_empty_dict_returns_empty_string(self):
+        assert extract_prompt({}) == ""
+
+    def test_scalar_prompt_is_coerced_to_string(self):
+        assert extract_prompt({"prompt": 5}) == "5"
+
+    def test_plain_string_prompt(self):
+        assert extract_prompt({"prompt": "hi"}) == "hi"
+
+    def test_list_prompt_joins_only_text_parts(self):
+        prompt = [
+            {"type": "image"},
+            {"type": "text", "text": "a"},
+            {"type": "text", "text": "b"},
+        ]
+        assert extract_prompt({"prompt": prompt}) == "a\nb"
 
 
 class TestGetPathBasedId:

@@ -6,11 +6,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/install-dependencies.sh",
-            "timeout": 60000
-          },
-          {
-            "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-hindsight.sh",
             "timeout": 30000
           }
@@ -23,7 +18,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3 ${CLAUDE_PLUGIN_ROOT}/scripts/retain-prompt.py"
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/retain-prompt.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/inject-memories.py"
           }
         ]
       }
@@ -34,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3 ${CLAUDE_PLUGIN_ROOT}/scripts/retain-transcript.py"
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/retain-transcript.py"
           }
         ]
       }

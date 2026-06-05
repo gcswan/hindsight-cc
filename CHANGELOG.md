@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-06-04
+
+Breaking infrastructure rewrite. The Docker container is renamed (causing a
+one-time restart on upgrade) and the runtime now requires a system `python3` on
+`PATH`.
+
+### Added
+
+- New `/hindsight-cc:setup` first-run wizard that configures the LLM provider,
+  model, API key, and base URL, then writes `~/.config/hindsight-cc/config.env`.
+- `ensure-hindsight.sh` reads `config.env` at container-create time with
+  precedence: explicit env var > `config.env` > built-in default. Local
+  providers (Ollama, LM Studio) need no API key.
+- `scripts/hindsight_api.py`: a stdlib-only (urllib/json) REST client wrapping
+  the Hindsight endpoints, with every call soft-failing.
+
+### Changed
+
+- **Breaking:** the shared Docker container is now named `hindsight` (was
+  `hindsight-cc`) and is shared with the sibling pi-ndsight project (same
+  `~/hindsight-data` volume and `claude-code--` bank prefix → shared memories).
+  `ensure-hindsight.sh` performs a one-time migration off the old
+  `hindsight-cc` container name, which restarts the server once.
+- **Breaking:** hooks now run under the system `python3` instead of a
+  virtualenv; a `python3` on `PATH` is now required.
+- Hooks call the stdlib REST client directly; the `hindsight-client` package
+  and `scripts/.venv` are no longer used at runtime.
+- Re-enabled memory injection on `UserPromptSubmit`: recall is hard-bounded at
+  ~2.5s and soft-fails to no injection.
+- Prompt and transcript retention are now fire-and-forget (non-blocking).
+- `SessionStart` runs only `ensure-hindsight.sh` (health-probe-first, reusing
+  any already-running server); the `install-dependencies.sh` SessionStart hook
+  was removed.
+- `requirements.txt` is now dev-only (pytest/pyright/ruff); the runtime has no
+  third-party dependencies.
+
+### Removed
+
+- Dropped the `hindsight-client` dependency and the runtime virtualenv.
+  `install-dependencies.sh` remains in-repo for dev tooling but is no longer
+  wired into any hook.
+
 ## [1.4.0] - 2026-06-04
 
 ### Changed

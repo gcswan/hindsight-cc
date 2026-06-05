@@ -48,7 +48,9 @@ def get_project_dir() -> str:
     return os.getcwd()
 
 
-def get_git_remote_id(project_dir: str) -> Optional[str]:
+def get_git_remote_id(
+    project_dir: str, debug_callback: Optional[Callable[[str], None]] = None
+) -> Optional[str]:
     """
     Extract owner/repo from git remote URL.
 
@@ -113,11 +115,19 @@ def get_git_remote_id(project_dir: str) -> Optional[str]:
         subprocess.TimeoutExpired,
         subprocess.CalledProcessError,
         FileNotFoundError,
-    ):
-        # Git not available, not in git repo, or timeout
+    ) as e:
+        # Git not available, not in git repo, or timeout. Log it like the
+        # unexpected-error branch below: a timeout in particular switches the
+        # caller to a *different* (path-based) bank, which is worth knowing.
+        if debug_callback:
+            debug_callback(f"get_git_remote_id: git unavailable/timeout: {type(e).__name__}: {e}")
         return None
-    except Exception:
-        # Any other error - fail gracefully
+    except Exception as e:
+        # Unexpected error (e.g. a regex/logic bug). Fail gracefully so the bank
+        # ID still resolves, but log it: silently returning None here switches
+        # the caller to a *different* (path-based) bank, which is worth knowing.
+        if debug_callback:
+            debug_callback(f"get_git_remote_id: unexpected error: {type(e).__name__}: {e}")
         return None
 
 
@@ -199,7 +209,7 @@ def get_bank_id(debug_callback: Optional[Callable[[str], None]] = None) -> str:
         pass
 
     # Try git-based ID first
-    git_id = get_git_remote_id(project_dir)
+    git_id = get_git_remote_id(project_dir, debug_callback=debug_callback)
     if git_id:
         debug(f"Using git-based ID: {git_id}")
         result = f"claude-code--{git_id}"
@@ -211,3 +221,31 @@ def get_bank_id(debug_callback: Optional[Callable[[str], None]] = None) -> str:
 
     # Ensure lowercase for consistency
     return result.lower()
+
+
+def extract_prompt(input_data: dict) -> str:
+    """
+    Extract the user prompt text from a Claude Code hook's stdin payload.
+
+    The hook input's "prompt" field may be a plain string or a list of content
+    parts (each a dict with "type"/"text"); both shapes are normalized to a
+    single string. This is external-format parsing shared by the
+    UserPromptSubmit hooks, so it must change in lockstep if the input shape
+    changes — hence one helper rather than duplicated logic per script.
+
+    Args:
+        input_data: Parsed JSON object from the hook's stdin.
+
+    Returns:
+        The prompt as a string ("" if absent).
+    """
+    prompt = input_data.get("prompt", "")
+    if isinstance(prompt, list):
+        return "\n".join(
+            part.get("text", "")
+            for part in prompt
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+    if not isinstance(prompt, str):
+        return str(prompt)
+    return prompt

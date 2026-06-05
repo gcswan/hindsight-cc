@@ -2,7 +2,9 @@
 import json
 import os
 import sys
-from bank_utils import get_bank_id
+
+import hindsight_api
+from bank_utils import extract_prompt, get_bank_id
 
 DEBUG = os.environ.get("HINDSIGHT_DEBUG", "").lower() in ("1", "true", "yes")
 
@@ -24,28 +26,13 @@ def main():
         debug(f"Failed to parse input: {e}")
         return
 
-    content = input_data.get("prompt", "")
-    if isinstance(content, list):
-        content = "\n".join(
-            part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
-        ).strip()
-    elif not isinstance(content, str):
-        content = str(content)
-
+    content = extract_prompt(input_data)
     debug(f"Content length: {len(content)} chars")
 
-    try:
-        from hindsight_client import Hindsight
-
-        debug("Connecting to Hindsight server")
-        client = Hindsight(base_url="http://localhost:8888")
-        client.retain(bank_id=bank_id, content=content)
-        client.close()
-        debug("Successfully retained prompt")
-    except Exception as e:
-        debug(f"Failed to retain prompt: {e}")
-        # Silently fail if Hindsight is unavailable
-        pass
+    # Read all of stdin and build `content` BEFORE detaching: the child must
+    # not touch stdin. retain_detached returns instantly and soft-fails.
+    hindsight_api.retain_detached(bank_id, content)
+    debug("Dispatched detached retain")
 
 
 if __name__ == "__main__":

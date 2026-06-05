@@ -23,7 +23,7 @@ This skill uses Hindsight's reflection capabilities to provide AI-assisted decis
 Run the following command with your reflection query. You can optionally specify budget level, additional context, and token limits for more comprehensive analysis.
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/.venv/bin/python3 ${CLAUDE_PLUGIN_ROOT}/scripts/reflect.py $ARGUMENTS
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/reflect.py $ARGUMENTS
 ```
 
 ### Parameters
