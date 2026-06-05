@@ -18,11 +18,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/retain-prompt.py"
+            "command": "sh ${CLAUDE_PLUGIN_ROOT}/scripts/hs-python.sh ${CLAUDE_PLUGIN_ROOT}/scripts/retain-prompt.py"
           },
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/inject-memories.py"
+            "command": "sh ${CLAUDE_PLUGIN_ROOT}/scripts/hs-python.sh ${CLAUDE_PLUGIN_ROOT}/scripts/inject-memories.py"
           }
         ]
       }
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/retain-transcript.py"
+            "command": "sh ${CLAUDE_PLUGIN_ROOT}/scripts/hs-python.sh ${CLAUDE_PLUGIN_ROOT}/scripts/retain-transcript.py"
           }
         ]
       }
