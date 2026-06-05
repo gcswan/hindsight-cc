@@ -28,6 +28,8 @@ The plugin operates through Claude Code hooks defined in `hooks/hooks.json`:
    - `scripts/inject-memories.py` - Queries for relevant memories and injects them into the prompt (injection is enabled; recall is hard-bounded at ~2.5s and soft-fails to no injection)
 3. **Stop**: Runs `scripts/retain-transcript.py` to store the conversation transcript segment (fire-and-forget, non-blocking)
 
+The three Python hook scripts are launched via `scripts/hs-python.sh`, a tiny POSIX-sh interpreter shim. It picks a working `python3` (preferring fast, direct system interpreters over a bare `python3` that may be a slow/broken pyenv·venv shim) and soft-fails to a silent no-op if none work — so a transiently-broken project interpreter can never turn a silent hook into a noisy "hook error". SessionStart's `ensure-hindsight.sh` invokes no Python and so is not routed through the shim.
+
 ### Memory Bank Isolation
 
 Each project gets its own isolated memory bank based on git repository identity (when available) or project path. **The plugin auto-detects the project directory from git root or current working directory - no environment variables needed.**
@@ -67,6 +69,7 @@ All scripts follow a pattern of silently failing if Hindsight is unavailable. Se
 - `scripts/hindsight_api.py` - Stdlib-only REST client (urllib/json) wrapping the Hindsight endpoints; all functions soft-fail so a prompt is never interrupted by a memory error
 - `scripts/bank_utils.py` - Shared utilities for bank ID generation (git-based with path fallback) and `extract_prompt` (normalizes the hook stdin payload)
 - `scripts/ensure-hindsight.sh` - Health-probe-first check that reuses or starts the Hindsight Docker container; reads `config.env` at container-create time
+- `scripts/hs-python.sh` - POSIX-sh interpreter shim that the Python hooks are launched through; probes candidate interpreters (preferring fast, direct system paths), execs the first that imports the stdlib the hooks need, and soft-fails to a silent no-op if none work
 - `scripts/retain-prompt.py` - Stores user prompts via `hindsight_api.retain_detached()`
 - `scripts/inject-memories.py` - Queries and injects relevant memories via `hindsight_api.recall()`
 - `scripts/retain-transcript.py` - Stores conversation transcript segments from the last user message onwards
@@ -74,7 +77,7 @@ All scripts follow a pattern of silently failing if Hindsight is unavailable. Se
 - `scripts/search-memories.py` - Manual search utility for testing
 - `scripts/get-status.py` - Status checking utility
 
-Hook and CLI scripts are run by the system `python3` directly, e.g. `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/...`. No virtualenv is used at runtime.
+The Python hook scripts are launched via `sh ${CLAUDE_PLUGIN_ROOT}/scripts/hs-python.sh ${CLAUDE_PLUGIN_ROOT}/scripts/<script>.py` (the interpreter shim above); CLI/command scripts are still run by the system `python3` directly. No virtualenv is used at runtime.
 
 ### Debug Logging
 

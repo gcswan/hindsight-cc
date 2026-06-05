@@ -118,6 +118,31 @@ def _run_hook(script_name, stdin_obj, base_url=None):
     )
 
 
+def _run_hook_via_shim(script_name, stdin_obj, base_url=None, candidates=None):
+    """Run a hook script the way hooks.json does: `sh hs-python.sh <script>`.
+
+    Exercises the real wiring -- the shim must pass the hook payload on stdin
+    through to the script (its probe must not consume stdin), forward the
+    script's stdout untouched, and exit 0. Optionally override the interpreter
+    candidate list via HS_PYTHON_CANDIDATES.
+    """
+    shim = SCRIPTS_DIR / "hs-python.sh"
+    env = {"PATH": _env_path()}
+    if base_url is not None:
+        env["HINDSIGHT_BASE_URL"] = base_url
+    if candidates is not None:
+        env["HS_PYTHON_CANDIDATES"] = candidates
+    stdin_data = stdin_obj if isinstance(stdin_obj, str) else json.dumps(stdin_obj)
+    return subprocess.run(
+        ["sh", str(shim), str(SCRIPTS_DIR / script_name)],
+        input=stdin_data,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+
 def _env_path():
     import os
 
@@ -406,8 +431,16 @@ class TestHooksJson:
         assert len(entries) == 1
         cmds = entries[0]["hooks"]
         assert len(cmds) == 2
-        assert cmds[0]["command"] == "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/retain-prompt.py"
-        assert cmds[1]["command"] == "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/inject-memories.py"
+        # Routed through hs-python.sh so a broken ambient python3 degrades
+        # silently instead of emitting a noisy hook error.
+        assert cmds[0]["command"] == (
+            "sh ${CLAUDE_PLUGIN_ROOT}/scripts/hs-python.sh "
+            "${CLAUDE_PLUGIN_ROOT}/scripts/retain-prompt.py"
+        )
+        assert cmds[1]["command"] == (
+            "sh ${CLAUDE_PLUGIN_ROOT}/scripts/hs-python.sh "
+            "${CLAUDE_PLUGIN_ROOT}/scripts/inject-memories.py"
+        )
 
     def test_stop_runs_retain_transcript(self, hooks):
         data, _ = hooks
@@ -415,7 +448,21 @@ class TestHooksJson:
         assert len(entries) == 1
         cmds = entries[0]["hooks"]
         assert len(cmds) == 1
-        assert cmds[0]["command"] == "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/retain-transcript.py"
+        assert cmds[0]["command"] == (
+            "sh ${CLAUDE_PLUGIN_ROOT}/scripts/hs-python.sh "
+            "${CLAUDE_PLUGIN_ROOT}/scripts/retain-transcript.py"
+        )
+
+    def test_python_hooks_route_through_shim(self, hooks):
+        """Every python-invoking hook must go through hs-python.sh, never a
+        bare `python3` (which would surface a broken interpreter as a noisy
+        hook error). SessionStart is exempt -- it runs ensure-hindsight.sh."""
+        data, _ = hooks
+        for event in ("UserPromptSubmit", "Stop"):
+            for entry in data["hooks"][event]:
+                for h in entry["hooks"]:
+                    assert "/scripts/hs-python.sh " in h["command"]
+                    assert not h["command"].startswith("python3 ")
 
     def test_no_venv_anywhere(self, hooks):
         _, raw = hooks
@@ -429,3 +476,70 @@ class TestHooksJson:
                 for h in entry["hooks"]:
                     assert h["type"] == "command"
                     assert isinstance(h["command"], str)
+
+
+class TestShimWiring:
+    """End-to-end: hooks.json routes python hooks through hs-python.sh, so the
+    shim must transparently run the REAL hook scripts -- passing stdin through,
+    forwarding stdout, and (when no interpreter works) degrading silently."""
+
+    def test_inject_memories_through_shim_emits_block(self, stub_server):
+        base_url, set_results = stub_server
+        set_results([{"text": "mem A"}, {"text": "mem B"}])
+        proc = _run_hook_via_shim(
+            "inject-memories.py", {"prompt": "what did we decide"}, base_url
+        )
+        assert proc.returncode == 0
+        # The shim's probe must not pollute the injected-prompt channel.
+        assert proc.stdout == "<hindsight-memories>\nmem A\nmem B\n</hindsight-memories>\n"
+
+    def test_retain_prompt_through_shim_reaches_server(self, stub_server):
+        """The shim must pass the hook payload on stdin through to the real
+        script, whose detached (forked) retain then lands on the server."""
+        base_url, _ = stub_server
+        proc = _run_hook_via_shim(
+            "retain-prompt.py", {"prompt": "shim-routed-TOKEN"}, base_url
+        )
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None, "detached retain never reached the server via shim"
+        assert match[1]["items"][0]["content"] == "shim-routed-TOKEN"
+
+    def test_no_working_interpreter_degrades_silently(self):
+        """No socket needed: force every candidate to be missing and confirm the
+        hook degrades to a silent no-op (exit 0, no stdout) -- the whole point of
+        the shim, vs a bare `python3` printing a CPython startup error."""
+        proc = _run_hook_via_shim(
+            "inject-memories.py",
+            {"prompt": "q"},
+            candidates="hs-nonexistent-interpreter-xyz",
+        )
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+
+
+class TestShellSuite:
+    """Run the standalone shell suite for hs-python.sh under pytest.
+
+    `test_hs_python.sh` is a .sh file, which pytest cannot collect on its own --
+    so without this wrapper the documented `pytest scripts/test` runner would
+    never execute it and its coverage of the shim's broken-interpreter fallback
+    would silently rot. This makes the shell suite a first-class part of the
+    Python test run.
+    """
+
+    def test_hs_python_shell_suite_passes(self):
+        suite = Path(__file__).parent / "test_hs_python.sh"
+        assert suite.exists(), f"missing shell suite: {suite}"
+        proc = subprocess.run(
+            ["sh", str(suite)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        # Surface the suite's own PASS/FAIL lines on failure for a usable report.
+        assert proc.returncode == 0, (
+            f"test_hs_python.sh failed (rc={proc.returncode}):\n"
+            f"{proc.stdout}\n{proc.stderr}"
+        )
