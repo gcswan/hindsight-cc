@@ -517,3 +517,29 @@ class TestShimWiring:
         )
         assert proc.returncode == 0
         assert proc.stdout == ""
+
+
+class TestShellSuite:
+    """Run the standalone shell suite for hs-python.sh under pytest.
+
+    `test_hs_python.sh` is a .sh file, which pytest cannot collect on its own --
+    so without this wrapper the documented `pytest scripts/test` runner would
+    never execute it and its coverage of the shim's broken-interpreter fallback
+    would silently rot. This makes the shell suite a first-class part of the
+    Python test run.
+    """
+
+    def test_hs_python_shell_suite_passes(self):
+        suite = Path(__file__).parent / "test_hs_python.sh"
+        assert suite.exists(), f"missing shell suite: {suite}"
+        proc = subprocess.run(
+            ["sh", str(suite)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        # Surface the suite's own PASS/FAIL lines on failure for a usable report.
+        assert proc.returncode == 0, (
+            f"test_hs_python.sh failed (rc={proc.returncode}):\n"
+            f"{proc.stdout}\n{proc.stderr}"
+        )

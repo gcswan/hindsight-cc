@@ -14,7 +14,12 @@
 
 TEST_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 SCRIPT="$TEST_DIR/../hs-python.sh"
-REAL_PY=$(command -v python3 || command -v python)
+# Resolve to the real interpreter BINARY, not a pyenv/asdf shim: a shim can add
+# ~3.3s of startup that would trip the probe's timeout backstop and make goodpy
+# (our stand-in for "a working interpreter") flaky. sys.executable is the direct
+# underlying binary.
+_PY=$(command -v python3 || command -v python)
+REAL_PY=$("$_PY" -c 'import sys; print(sys.executable)' 2>/dev/null || printf '%s' "$_PY")
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -38,11 +43,19 @@ assert_eq() {
 	fi
 }
 
-# assert_contains DESC HAYSTACK NEEDLE
+# assert_not_contains DESC HAYSTACK NEEDLE
 assert_not_contains() {
 	case "$2" in
 	*"$3"*) fail "$1 (found unwanted [$3] in [$2])" ;;
 	*) pass "$1" ;;
+	esac
+}
+
+# assert_contains DESC HAYSTACK NEEDLE
+assert_contains() {
+	case "$2" in
+	*"$3"*) pass "$1" ;;
+	*) fail "$1 (expected [$3] in [$2])" ;;
 	esac
 }
 
@@ -68,6 +81,14 @@ exit 1
 EOF
 chmod +x "$BIN/brokenpy"
 
+# hangpy: simulates a wedged interpreter whose probe never returns. The shim's
+# timeout backstop must skip it rather than stall the user's prompt forever.
+cat >"$BIN/hangpy" <<'EOF'
+#!/bin/sh
+sleep 30
+EOF
+chmod +x "$BIN/hangpy"
+
 # target script: proves it was exec'd, that stdin reached it intact, and that
 # the probe did not pollute stdout. Echoes "RAN:<stdin>".
 cat >"$SANDBOX/target.py" <<'EOF'
@@ -82,6 +103,18 @@ run_shim() {
 	ERRFILE="$SANDBOX/err"
 	OUT=$(printf '%s' "$_stdin" | PATH="$BIN:$PATH" HS_PYTHON_CANDIDATES="$_cands" \
 		sh "$SCRIPT" "$SANDBOX/target.py" 2>"$ERRFILE")
+	RC=$?
+	ERR=$(cat "$ERRFILE")
+}
+
+# run_shim_debug CANDIDATES STDIN  -> like run_shim but with HINDSIGHT_DEBUG=1,
+# so the shim's diagnostic stderr is exercised. stdout must stay clean.
+run_shim_debug() {
+	_cands="$1"
+	_stdin="$2"
+	ERRFILE="$SANDBOX/err"
+	OUT=$(printf '%s' "$_stdin" | PATH="$BIN:$PATH" HS_PYTHON_CANDIDATES="$_cands" \
+		HINDSIGHT_DEBUG=1 sh "$SCRIPT" "$SANDBOX/target.py" 2>"$ERRFILE")
 	RC=$?
 	ERR=$(cat "$ERRFILE")
 }
@@ -127,6 +160,52 @@ NOARG_OUT=$(PATH="$BIN:$PATH" sh "$SCRIPT" 2>"$SANDBOX/err2")
 NOARG_RC=$?
 assert_eq "no-arg: exits 0" "0" "$NOARG_RC"
 assert_eq "no-arg: no stdout" "" "$NOARG_OUT"
+
+# ---------------------------------------------------------------------------
+# 6. Under HINDSIGHT_DEBUG, a rejected candidate's REASON is surfaced to stderr
+#    (so a silent no-op is diagnosable) -- while stdout stays clean. This is the
+#    debug-mode complement of test 2's non-debug "error is not surfaced".
+# ---------------------------------------------------------------------------
+run_shim_debug "brokenpy goodpy" "DBG"
+assert_eq "debug: stdout still clean (debug goes to stderr)" "RAN:DBG" "$OUT"
+assert_eq "debug: exit 0" "0" "$RC"
+assert_contains "debug: logs the candidate it probed" "$ERR" "probing: brokenpy"
+assert_contains "debug: surfaces the rejection reason" "$ERR" "rejected brokenpy"
+assert_contains "debug: surfaces the underlying error text" "$ERR" "exec_prefix"
+assert_contains "debug: logs the interpreter it chose" "$ERR" "using interpreter: goodpy"
+
+# ---------------------------------------------------------------------------
+# 7. Under HINDSIGHT_DEBUG with no working interpreter -> still a silent-stdout
+#    soft-fail (exit 0, no stdout), but the all-fail reason IS logged to stderr.
+# ---------------------------------------------------------------------------
+run_shim_debug "brokenpy" "q"
+assert_eq "debug-no-python: exits 0" "0" "$RC"
+assert_eq "debug-no-python: no stdout" "" "$OUT"
+assert_contains "debug-no-python: logs the soft-fail" "$ERR" "no working python3 interpreter found"
+
+# ---------------------------------------------------------------------------
+# 8. A HANGING candidate is bounded by the probe timeout and skipped, so the
+#    shim falls through to a working interpreter instead of stalling the user's
+#    prompt forever. Only meaningful where `timeout`/`gtimeout` exists; without
+#    it the probe is unbounded by design, so skip rather than hang the suite.
+# ---------------------------------------------------------------------------
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+	HANG_START=$(date +%s)
+	HANG_OUT=$(printf '%s' "BOUNDED" | PATH="$BIN:$PATH" \
+		HS_PYTHON_CANDIDATES="hangpy goodpy" HS_PROBE_TIMEOUT=1 \
+		sh "$SCRIPT" "$SANDBOX/target.py" 2>/dev/null)
+	HANG_RC=$?
+	HANG_ELAPSED=$(($(date +%s) - HANG_START))
+	assert_eq "hang: bounded probe skips hung candidate, runs good one" "RAN:BOUNDED" "$HANG_OUT"
+	assert_eq "hang: exit 0" "0" "$HANG_RC"
+	if [ "$HANG_ELAPSED" -lt 10 ]; then
+		pass "hang: completed well under the 30s hang (took ${HANG_ELAPSED}s)"
+	else
+		fail "hang: took ${HANG_ELAPSED}s -- probe was not bounded"
+	fi
+else
+	pass "hang: skipped (no timeout/gtimeout; probe is unbounded by design)"
+fi
 
 # ---------------------------------------------------------------------------
 rm -rf "$SANDBOX"
