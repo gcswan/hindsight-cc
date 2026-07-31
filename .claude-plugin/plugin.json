@@ -1,6 +1,6 @@
 {
   "name": "hindsight-cc",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Persistent memory across Claude Code conversations using Hindsight vector database",
   "author": {
     "name": "gcswan"

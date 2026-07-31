@@ -182,7 +182,7 @@ variable or via `~/.config/hindsight-cc/config.env` (written by
 | `HINDSIGHT_API_LLM_MODEL`   | LLM model for Hindsight                      | `gpt-5-nano`                            |
 | `HINDSIGHT_API_LLM_BASE_URL`| LLM base URL (local providers / custom endpoints) | (unset)                            |
 | `HINDSIGHT_DEBUG`           | Enable debug logging (`1`, `true`, or `yes`) | (disabled)                              |
-| `HINDSIGHT_IMAGE`           | Docker image for Hindsight server            | `ghcr.io/vectorize-io/hindsight:0.7.2` |
+| `HINDSIGHT_IMAGE`           | Docker image for Hindsight server            | `ghcr.io/vectorize-io/hindsight:0.8.6` |
 
 ### Data Storage
 

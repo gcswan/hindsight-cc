@@ -12,7 +12,7 @@ LEGACY_CONTAINER_NAME="hindsight-cc"
 # Keep the health URL consistent with the Python client, which reads
 # HINDSIGHT_BASE_URL (defaulting to http://localhost:8888).
 HEALTH_URL="${HINDSIGHT_BASE_URL:-http://localhost:8888}/health"
-HINDSIGHT_IMAGE_DEFAULT="ghcr.io/vectorize-io/hindsight:0.7.2"
+HINDSIGHT_IMAGE_DEFAULT="ghcr.io/vectorize-io/hindsight:0.8.6"
 CONFIG_FILE="${HINDSIGHT_CONFIG_FILE:-$HOME/.config/hindsight-cc/config.env}"
 
 # Built-in defaults for LLM settings.
