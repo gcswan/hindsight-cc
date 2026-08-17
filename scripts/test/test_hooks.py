@@ -360,6 +360,119 @@ class TestRetainTranscript:
         assert proc.returncode == 0
         assert proc.stdout == ""
 
+    def _write_tool_using_transcript(self, tmp_path):
+        """A turn shaped like a real Claude Code transcript: the user asks, the
+        assistant calls a tool, the tool result comes back as a `user` message,
+        and the assistant answers. Claude Code records tool results with
+        role="user", so the last role=="user" entry is NOT the user's prompt.
+        """
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            {"message": {"role": "user", "content": "why did the build break"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "checking the build log"},
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "error: missing dep"},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "the lockfile is stale"},
+            ]}},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        return path
+
+    def test_tool_result_does_not_truncate_the_retained_turn(
+        self, tmp_path, stub_server
+    ):
+        """The turn is sliced from the user's PROMPT, not the last tool result.
+
+        Tool results are recorded with role="user", so slicing at the last
+        role=="user" entry drops the user's question and every assistant message
+        before the final one -- the bulk of the turn never reaches the server.
+        """
+        base_url, _ = stub_server
+        transcript = self._write_tool_using_transcript(tmp_path)
+        proc = _run_hook(
+            "retain-transcript.py",
+            {"transcript_path": str(transcript)},
+            base_url,
+        )
+        assert proc.returncode == 0
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None, "detached retain never reached the server"
+        content = match[1]["items"][0]["content"]
+        assert "why did the build break" in content, (
+            "the user's prompt was dropped from the retained turn"
+        )
+        assert "checking the build log" in content, (
+            "assistant text before the tool call was dropped"
+        )
+        assert "the lockfile is stale" in content
+
+    def test_transcript_of_only_tool_results_still_retains_the_turn(
+        self, tmp_path, stub_server
+    ):
+        """A transcript with no real prompt must not retain nothing.
+
+        A handful of real transcripts (resumed/compacted sessions) contain only
+        tool-result `user` messages. Preferring the real prompt must not turn
+        those into a silent no-op -- fall back to the last role=="user" entry.
+        """
+        base_url, _ = stub_server
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "result"},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "the salvaged answer"},
+            ]}},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(path)}, base_url
+        )
+        assert proc.returncode == 0
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None, "nothing was retained for a tool-result-only turn"
+        assert "the salvaged answer" in match[1]["items"][0]["content"]
+
+    def test_entries_without_a_message_role_are_not_retained_as_unknown(
+        self, tmp_path, stub_server
+    ):
+        """Non-message JSONL entries must be skipped, not emitted as `unknown:`.
+
+        Claude Code interleaves non-message records (hook results, summaries)
+        into the transcript. Emitting them as empty `unknown:` lines feeds noise
+        to the extraction LLM.
+        """
+        base_url, _ = stub_server
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            {"message": {"role": "user", "content": "the real question"}},
+            {"type": "system", "subtype": "hook_result"},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "the real answer"},
+            ]}},
+            {"type": "summary", "summary": "some summary"},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(path)}, base_url
+        )
+        assert proc.returncode == 0
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None
+        content = match[1]["items"][0]["content"]
+        assert "the real question" in content
+        assert "the real answer" in content
+        assert "unknown:" not in content
+
 
 def _load_script_module(filename, mod_name):
     """Load a hyphenated script (e.g. inject-memories.py) via importlib."""

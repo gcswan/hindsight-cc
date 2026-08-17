@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-10-09
+
+### Fixed
+
+- `retain-transcript.py` retained only a fraction of each turn. Claude Code
+  records tool results as messages with `role="user"`, so slicing the transcript
+  at the last `role=="user"` entry started the slice *after* the final tool
+  result on any turn that used tools, dropping the user's prompt and every
+  assistant message before the last one. Measured against the last turn of 435
+  local transcripts, about three quarters of the turn never reached the server.
+  The slice now starts at the user's prompt: the last `role="user"` entry that
+  carries no `tool_result` part and is not an `isMeta` entry.
+- `isMeta` entries (skill bodies loaded by the Skill tool, slash-command
+  expansions, injected reminders) are `role="user"` messages too. They are no
+  longer taken for the user's prompt, and are left out of the retained text,
+  since they hold instructions rather than conversation.
+- When a transcript has no user prompt at all, the whole transcript is retained
+  from its first user-role entry, instead of only the tail after the last tool
+  result.
+- Transcript entries with no `message.role` (attachments, system records) were
+  emitted as empty `unknown:` lines, and tool results and tool-call-only
+  assistant messages as empty `user:` / `assistant:` lines, feeding noise to the
+  extraction LLM. Lines with no text are now skipped.
+
 ## [2.1.0] - 2026-10-08
 
 ### Added
