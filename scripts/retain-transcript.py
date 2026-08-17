@@ -52,14 +52,36 @@ def main():
         debug("No messages in transcript")
         return
 
-    # Find the last user message index
+    # Find the last user PROMPT index.
+    #
+    # Claude Code records tool results as messages with role="user", so the last
+    # role=="user" entry is usually a tool result rather than something the user
+    # typed. Slicing there would drop the user's question and every assistant
+    # message before the final one. Only entries whose content carries no
+    # tool_result part count as a real prompt.
     last_user_idx = -1
+    last_any_user_idx = -1
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
         inner = msg.get("message", {}) if isinstance(msg, dict) else {}
-        if isinstance(inner, dict) and inner.get("role") == "user":
-            last_user_idx = i
-            break
+        if not isinstance(inner, dict) or inner.get("role") != "user":
+            continue
+        if last_any_user_idx == -1:
+            last_any_user_idx = i
+        content = inner.get("content", "")
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "tool_result"
+            for part in content
+        ):
+            continue
+        last_user_idx = i
+        break
+
+    if last_user_idx == -1:
+        # Resumed/compacted transcripts can carry only tool-result user
+        # messages. Retaining the tail beats retaining nothing at all.
+        last_user_idx = last_any_user_idx
+        debug("No user prompt found; falling back to last user-role message")
 
     if last_user_idx == -1:
         debug("No user message found in transcript")
@@ -77,7 +99,12 @@ def main():
         inner = msg.get("message", {})
         if not isinstance(inner, dict):
             continue
-        role = inner.get("role", "unknown")
+        # Transcripts interleave non-message records (hook results, summaries).
+        # Skip anything without a role rather than emitting an `unknown:` line,
+        # which would only feed noise to the extraction LLM.
+        role = inner.get("role")
+        if not role:
+            continue
         content = inner.get("content", "")
         if isinstance(content, list):
             content = "\n".join(

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-08-17
+
+### Fixed
+
+- `retain-transcript.py` retained only a fraction of each turn. Claude Code
+  records tool results as messages with `role="user"`, so slicing the transcript
+  at the last `role=="user"` entry started the slice *after* the final tool
+  result on any turn that used tools — dropping the user's prompt and every
+  assistant message before the last one. Measured against 10 real transcripts,
+  82% of last-turn content never reached the server; several turns lost 96-98%
+  and retained little more than `user: \nassistant: <final sentence>`. The slice
+  now starts at the last user message that carries no `tool_result` part, and
+  falls back to the previous behaviour when a transcript contains no such
+  message (resumed/compacted sessions) so those turns still retain something.
+- Transcript entries with no `message.role` (hook results, summaries) were
+  emitted as empty `unknown:` lines, feeding noise to the extraction LLM. They
+  are now skipped.
+
 ## [2.0.0] - 2026-06-04
 
 Breaking infrastructure rewrite. The Docker container is renamed (causing a
