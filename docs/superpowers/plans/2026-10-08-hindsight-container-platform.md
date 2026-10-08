@@ -2547,7 +2547,8 @@ HINDSIGHT_API_LLM_API_KEY="$(op item get "$OP_ITEM" --fields password --reveal)"
 
 Expected output (no key anywhere):
 `Stopping 'hindsight' (up to 60s for a clean Postgres shutdown)...` then
-`Recreated 'hindsight' (linux/arm64). The previous container is kept, stopped, as 'hindsight-prev' for rollback.`
+`Recreated 'hindsight' (linux/arm64, memory 4g). The previous container is kept, stopped, as 'hindsight-prev' for rollback.`
+When Postgres binaries were parked, a manual-rollback note follows (remove the new container, swap the binaries back, restore the old one).
 Exit 0. If it prints `Recreate failed; rolling back...`, the original container is already running again under its old name and `installation` is restored; read the error above that line, fix it, and retry. Do not delete anything.
 
 - [ ] **Step 4: Verify the new container**

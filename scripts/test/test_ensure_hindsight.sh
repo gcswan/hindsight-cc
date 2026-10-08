@@ -151,6 +151,7 @@ config_parser_tests() {
 #   FAKE_RENAME_BACK_FAIL     `docker rename hindsight-prev hindsight` fails when "1"
 #   FAKE_STOP_SIGNAL          the SECOND `docker stop` (the rollback's) sends this signal to its parent
 #   FAKE_LOGS_OUT             text `docker logs` prints
+#   FAKE_PS_FAIL_AFTER_RM     `docker ps` fails once any `docker rm` has run when "1"
 # `docker run` also writes each argument as [arg] on one line to "$FAKE_LOG.args",
 # so a test can tell whether a value arrived as ONE argument (word-splitting).
 # The fake also tracks whether a container NAMED "hindsight" exists (only when
@@ -177,6 +178,7 @@ info)
 	exit 0
 	;;
 ps)
+	[ "${FAKE_PS_FAIL_AFTER_RM:-0}" = "1" ] && [ -f "$FAKE_LOG.rm-done" ] && exit 1
 	# Determine which name filter was requested and echo a fake id if "exists".
 	for a in "$@"; do
 		case "$a" in
@@ -220,6 +222,7 @@ start)
 	exit 0
 	;;
 rm)
+	: >"$FAKE_LOG.rm-done"
 	[ "${FAKE_RM_FAIL:-0}" = "1" ] && exit 1
 	for rm_arg in "$@"; do rm_name="$rm_arg"; done
 	if [ "$rm_name" = hindsight ] || [ "$rm_name" = hsid456 ]; then
@@ -1281,6 +1284,13 @@ flow_test_recreate_success() {
 	*"parked as '$data/installation.amd64'"*"installation.amd64"*) pass "recreate(a): names the parked binaries and how to swap them back" ;;
 	*) fail "recreate(a): expected the parked-binaries note, got: $out" ;;
 	esac
+	printf '%s\n' "$out" >"$tmp/out.txt"
+	if log_before "docker rm hindsight" "mv '$data/installation'" "$tmp/out.txt" &&
+		log_before "mv '$data/installation'" "docker rename hindsight-prev hindsight" "$tmp/out.txt"; then
+		pass "recreate(a): the manual rollback removes the new container, then swaps binaries, then restores the old one"
+	else
+		fail "recreate(a): expected rm before mv before rename in the note, got: $out"
+	fi
 
 	rm -rf "$tmp"
 }
@@ -1751,6 +1761,45 @@ flow_test_missing_key_rm_failure_leaves_binaries() {
 	rm -rf "$tmp"
 }
 
+flow_test_missing_key_ps_failure_fails_closed() {
+	# A failing `docker ps` after the rm must not read as "gone": no binary
+	# moves, no docker run.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_q.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_MISSING_KEY=1 \
+			FAKE_PS_FAIL_AFTER_RM=1 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			HINDSIGHT_DATA_DIR="$data" \
+			HINDSIGHT_API_LLM_API_KEY="test-key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT" 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(q): a failing docker ps exits 1" "1" "$rc"
+	assert_eq "flow(q): the amd64 binaries are untouched" "amd64" \
+		"$(elf_arch "$data/installation/18.1.0/bin/postgres")"
+	if grep -q -E '^run ' "$log"; then
+		fail "flow(q): docker run must not be called"
+	else
+		pass "flow(q): no docker run"
+	fi
+
+	rm -rf "$tmp"
+}
+
 flow_test_recreate_reports_causes() {
 	# P3: an operator-run recreate says why it failed. (a) docker run's own
 	# error, (b) the new container's diagnosis and logs BEFORE the rollback,
@@ -1797,7 +1846,8 @@ flow_test_recreate_reports_causes() {
 		recreate_run "$tmp"
 	)
 	printf '%s\n' "$out" >"$tmp/out.txt"
-	if log_before "is not runnable (state: exit code 132)" "Recreate failed; rolling back" "$tmp/out.txt"; then
+	if log_before "The new 'hindsight' container failed:" "is not runnable" "$tmp/out.txt" &&
+		log_before "is not runnable (state: exit code 132)" "Recreate failed; rolling back" "$tmp/out.txt"; then
 		pass "recreate(k): the new container's diagnosis comes before the rollback"
 	else
 		fail "recreate(k): expected the diagnosis before the rollback, got: $out"
@@ -1998,6 +2048,7 @@ flow_test_exec_failure_advice_depends_on_cause
 flow_test_drift_is_reported_only_in_debug
 flow_test_key_with_shell_metacharacters
 flow_test_missing_key_rm_failure_leaves_binaries
+flow_test_missing_key_ps_failure_fails_closed
 
 echo "=== recreate ==="
 flow_test_recreate_success

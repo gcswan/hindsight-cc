@@ -575,7 +575,12 @@ create_or_recreate() {
 			docker rm -f "$container_id" >/dev/null 2>&1
 			# create_container moves Postgres binaries, which is only safe when no
 			# container uses the data directory: confirm the old one is really gone.
-			if [ -n "$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]; then
+			# A failing `docker ps` must not read as "gone": fail closed.
+			if ! cr_left=$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null); then
+				echo "Error: could not check whether the existing '$CONTAINER_NAME' container was removed, so it was not recreated" >&2
+				return 1
+			fi
+			if [ -n "$cr_left" ]; then
 				echo "Error: could not remove the existing '$CONTAINER_NAME' container, so it was not recreated (run: docker rm -f $CONTAINER_NAME)" >&2
 				return 1
 			fi
@@ -691,8 +696,12 @@ recreate_container() {
 		fi
 		echo "Recreated '$CONTAINER_NAME' (${EFF_PLATFORM:-docker default platform}, $rc_mem). The previous container is kept, stopped, as '$rc_prev' for rollback."
 		if [ "$GUARD_SWAPPED" = "1" ]; then
-			echo "The original $GUARD_HAVE Postgres binaries were parked as '$DATA_DIR/installation.$GUARD_HAVE'. Rolling back to '$rc_prev' by hand needs the binaries swapped back first:"
+			# One stream (stderr, like the hint and steps below) so the order reads true.
+			echo "The original $GUARD_HAVE Postgres binaries were parked as '$DATA_DIR/installation.$GUARD_HAVE'. To roll back by hand later: remove the new container, swap the binaries back, then restore the old one:" >&2
+			echo "  docker stop -t 60 $CONTAINER_NAME" >&2
+			echo "  docker rm $CONTAINER_NAME" >&2
 			rollback_binaries_hint
+			rollback_manual_steps "$rc_prev"
 		fi
 		return 0
 	fi
@@ -735,6 +744,7 @@ report_new_container_failure() {
 		rnf_why=$(container_exec_failure "$CONTAINER_NAME")
 	fi
 	if [ -n "$rnf_why" ]; then
+		echo "The new '$CONTAINER_NAME' container failed:" >&2
 		exec_failure_advice "$rnf_why"
 	fi
 	if [ -n "$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]; then
