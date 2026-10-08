@@ -140,12 +140,23 @@ config_parser_tests() {
 #   FAKE_RUN_KEY_FILE         file that receives the API key docker run inherited
 #   FAKE_STOP_FAIL            `docker stop` fails when "1"
 #   FAKE_RENAME_FAIL          `docker rename` fails when "1"
+#   FAKE_RUN_FAIL             `docker run` fails (creates nothing) when "1"
+#   FAKE_RUN_MKDIR            directory `docker run` creates (to occupy a slot)
+#   FAKE_RM_FAIL              `docker rm` (with or without -f) fails when "1"
+#   FAKE_DISABLE_RESTART_FAIL `docker update --restart=no ...` fails when "1"
+# The fake also tracks whether a container NAMED "hindsight" exists (only when
+# FAKE_HINDSIGHT_EXISTS=1): renaming it away or removing it by name makes it
+# absent, and `docker run` / renaming something back to it makes it present.
+# Removing an absent "hindsight" by name fails, like the real "No such container".
+# `docker start` also logs `fake-start-sees-installation <ELF e_machine hex>` for
+# HINDSIGHT_DATA_DIR/installation, so tests can see which binaries were in place.
 build_shims() {
 	dir="$1"
 
 	cat >"$dir/docker" <<'EOF'
 #!/bin/sh
 echo "$@" >>"$FAKE_LOG"
+fake_absent="$FAKE_LOG.hindsight-absent"
 cmd="$1"
 case "$cmd" in
 info)
@@ -161,7 +172,7 @@ ps)
 			[ "${FAKE_HINDSIGHT_CC_EXISTS:-0}" = "1" ] && echo "ccid123"
 			;;
 		name=^hindsight$)
-			[ "${FAKE_HINDSIGHT_EXISTS:-0}" = "1" ] && echo "hsid456"
+			[ "${FAKE_HINDSIGHT_EXISTS:-0}" = "1" ] && [ ! -f "$fake_absent" ] && echo "hsid456"
 			;;
 		name=^hindsight-prev$)
 			[ "${FAKE_PREV_EXISTS:-0}" = "1" ] && echo "previd789"
@@ -171,6 +182,9 @@ ps)
 	exit 0
 	;;
 run)
+	[ "${FAKE_RUN_FAIL:-0}" = "1" ] && exit 1
+	rm -f "$fake_absent"
+	[ -n "${FAKE_RUN_MKDIR:-}" ] && mkdir -p "$FAKE_RUN_MKDIR"
 	# Record the API key docker would inherit from the caller's environment,
 	# then simulate a started server.
 	[ -n "${FAKE_RUN_KEY_FILE:-}" ] && printf '%s' "${HINDSIGHT_API_LLM_API_KEY:-}" >"$FAKE_RUN_KEY_FILE"
@@ -178,8 +192,30 @@ run)
 	exit 0
 	;;
 start)
+	# Log which Postgres binaries are in place at start time.
+	for fs_bin in "${HINDSIGHT_DATA_DIR:-/nonexistent}"/installation/*/bin/postgres; do
+		if [ -f "$fs_bin" ]; then
+			echo "fake-start-sees-installation $(od -An -tx1 -j18 -N2 "$fs_bin" | tr -d ' \n')" >>"$FAKE_LOG"
+		fi
+		break
+	done
 	# Starting an existing container also brings the server up.
 	[ -n "${FAKE_MARKER:-}" ] && : >"$FAKE_MARKER"
+	exit 0
+	;;
+rm)
+	[ "${FAKE_RM_FAIL:-0}" = "1" ] && exit 1
+	for rm_arg in "$@"; do rm_name="$rm_arg"; done
+	if [ "$rm_name" = hindsight ]; then
+		[ -f "$fake_absent" ] && exit 1
+		: >"$fake_absent"
+	fi
+	exit 0
+	;;
+update)
+	case "$*" in
+	*"--restart=no"*) [ "${FAKE_DISABLE_RESTART_FAIL:-0}" = "1" ] && exit 1 ;;
+	esac
 	exit 0
 	;;
 image)
@@ -213,6 +249,8 @@ stop)
 	;;
 rename)
 	[ "${FAKE_RENAME_FAIL:-0}" = "1" ] && exit 1
+	[ "$2" = hindsight ] && : >"$fake_absent"
+	[ "$3" = hindsight ] && rm -f "$fake_absent"
 	exit 0
 	;;
 *)
@@ -1066,6 +1104,16 @@ recreate_run() {
 	echo "exit=$?"
 }
 
+# rollback_seq LOGFILE
+# The rollback-relevant docker calls logged from the new container's `run`
+# onwards, joined with `|`, so a test can pin their exact order (including the
+# binaries the fake saw at `start` time).
+rollback_seq() {
+	sed -n '/^run -d --name hindsight /,$p' "$1" |
+		grep -E '^(stop -t 60 hindsight|rm (-f )?hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation [0-9a-f]+)$' |
+		tr '\n' '|'
+}
+
 flow_test_recreate_success() {
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_a.XXXXXX")
 	build_shims "$tmp"
@@ -1185,6 +1233,10 @@ flow_test_recreate_rolls_back() {
 		else
 			fail "recreate(c): $scenario did not roll back: $(tr '\n' '|' <"$log")"
 		fi
+		# 3e00 = amd64: the original binaries are back before the old one starts.
+		assert_eq "recreate(c): $scenario stops and removes the new one, restores the binaries, then renames back and starts" \
+			"stop -t 60 hindsight|rm hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation 3e00|" \
+			"$(rollback_seq "$log")"
 		if grep -q -E '^rm hindsight$' "$log"; then
 			pass "recreate(c): $scenario removes the failed new container"
 		else
@@ -1251,6 +1303,84 @@ flow_test_recreate_command_failures() {
 	done
 }
 
+flow_test_recreate_rollback_failures() {
+	# The rollback must check its own steps: (1) `docker run` failed, so there is
+	# no new container to remove (a normal rollback); (2) the new container cannot
+	# be removed; (3) the original binaries cannot be put back; (4) restarts on
+	# the rollback copy cannot be disabled.
+	for scenario in run-fails rm-fails undo-fails update-fails; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_f.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+		data="$tmp/data"
+		mkelf "$data/installation/18.1.0/bin/postgres" amd64
+		mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+		out=$(
+			unset HINDSIGHT_PLATFORM
+			FAKE_HINDSIGHT_EXISTS=1
+			FAKE_DAEMON_ARCH=aarch64
+			FAKE_IMAGE_ARCH=arm64
+			HINDSIGHT_DATA_DIR="$data"
+			HINDSIGHT_API_LLM_API_KEY="test-key"
+			# No FAKE_MARKER: a created container never becomes healthy.
+			if [ "$scenario" = run-fails ]; then FAKE_RUN_FAIL=1; fi
+			if [ "$scenario" = rm-fails ]; then FAKE_RM_FAIL=1; fi
+			if [ "$scenario" = undo-fails ]; then FAKE_RUN_MKDIR="$data/installation.arm64"; fi
+			if [ "$scenario" = update-fails ]; then FAKE_DISABLE_RESTART_FAIL=1; fi
+			export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+			export FAKE_RUN_FAIL FAKE_RM_FAIL FAKE_RUN_MKDIR FAKE_DISABLE_RESTART_FAIL
+			recreate_run "$tmp"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+		assert_eq "recreate(f): $scenario exits 1" "1" "$rc"
+
+		if [ "$scenario" = run-fails ]; then
+			assert_eq "recreate(f): run-fails still restores the original container and binaries" \
+				"stop -t 60 hindsight|rm hindsight|rm -f hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation 3e00|" \
+				"$(rollback_seq "$log")"
+			case "$out" in
+			*"original 'hindsight' container was restored"*) pass "recreate(f): run-fails says the original was restored" ;;
+			*) fail "recreate(f): run-fails expected a 'restored' message, got: $out" ;;
+			esac
+		elif [ "$scenario" = update-fails ]; then
+			if grep -q -E '^run ' "$log"; then
+				fail "recreate(f): update-fails must not create a container"
+			else
+				pass "recreate(f): update-fails creates no container"
+			fi
+			if log_before "update --restart=no hindsight-prev" "rename hindsight-prev hindsight" "$log" &&
+				log_has "start hindsight" "$log"; then
+				pass "recreate(f): update-fails renames the original back and starts it"
+			else
+				fail "recreate(f): update-fails did not roll back: $(tr '\n' '|' <"$log")"
+			fi
+		else
+			case "$out" in
+			*"rollback incomplete"*) pass "recreate(f): $scenario reports an incomplete rollback" ;;
+			*) fail "recreate(f): $scenario expected 'rollback incomplete', got: $out" ;;
+			esac
+			if grep -q -E '^start hindsight$' "$log"; then
+				fail "recreate(f): $scenario must not start the old container"
+			else
+				pass "recreate(f): $scenario does not start the old container"
+			fi
+			if [ "$scenario" = rm-fails ]; then
+				if grep -q -E '^rename hindsight-prev hindsight$' "$log"; then
+					fail "recreate(f): rm-fails must not rename the old container back"
+				else
+					pass "recreate(f): rm-fails leaves the old container as the rollback copy"
+				fi
+				assert_eq "recreate(f): rm-fails leaves the binaries alone while the new container may run" "amd64" \
+					"$(elf_arch "$data/installation.amd64/18.1.0/bin/postgres")"
+			fi
+		fi
+
+		rm -rf "$tmp"
+	done
+}
+
 flow_test_recreate_and_usage_edges() {
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_d.XXXXXX")
 
@@ -1310,6 +1440,7 @@ flow_test_recreate_success
 flow_test_recreate_refusals
 flow_test_recreate_rolls_back
 flow_test_recreate_command_failures
+flow_test_recreate_rollback_failures
 flow_test_recreate_and_usage_edges
 
 echo ""

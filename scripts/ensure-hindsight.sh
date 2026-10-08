@@ -591,7 +591,13 @@ recreate_container() {
 		docker start "$CONTAINER_NAME" >/dev/null 2>&1
 		return 1
 	fi
-	docker update --restart=no "$rc_prev" >/dev/null 2>&1
+	# A rollback copy that can restart on its own could end up running beside
+	# the new container on the same data directory, so this must succeed.
+	if ! docker update --restart=no "$rc_prev" >/dev/null 2>&1; then
+		echo "Error: could not disable restarts on '$rc_prev'" >&2
+		recreate_rollback "$rc_prev"
+		return 1
+	fi
 
 	if create_container &&
 		wait_for_ready "${HINDSIGHT_RECREATE_WAIT_SECONDS:-180}" &&
@@ -600,15 +606,75 @@ recreate_container() {
 		return 0
 	fi
 
-	echo "Recreate failed; rolling back to the previous container..." >&2
-	docker stop -t 60 "$CONTAINER_NAME" >/dev/null 2>&1
-	docker rm "$CONTAINER_NAME" >/dev/null 2>&1
-	undo_guard
-	docker rename "$rc_prev" "$CONTAINER_NAME" >/dev/null 2>&1
-	docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1
-	docker start "$CONTAINER_NAME" >/dev/null 2>&1
+	recreate_rollback "$rc_prev"
 	return 1
 }
+
+# recreate_rollback PREV
+# Puts the previous container PREV back after a failed recreate, checking each
+# step. The new container must be gone before the Postgres binaries are moved
+# back (undo_guard), and the binaries must be back before the old container
+# starts, or it would run on the wrong ones. When a step fails it stops there,
+# says so, and prints the commands to finish by hand. Always returns 1.
+recreate_rollback() {
+	rr_prev="$1"
+	echo "Recreate failed; rolling back to the previous container..." >&2
+
+	docker stop -t 60 "$CONTAINER_NAME" >/dev/null 2>&1
+	if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+		docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
+	fi
+	# Ask Docker rather than trusting rm's exit status: rm also fails when the
+	# new container was never created (e.g. `docker run` itself failed).
+	if [ -n "$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]; then
+		echo "Error: rollback incomplete: the new '$CONTAINER_NAME' container could not be removed, so '$rr_prev' was left stopped and the Postgres binaries in '$DATA_DIR' were not touched. To finish by hand:" >&2
+		echo "  docker rm -f $CONTAINER_NAME" >&2
+		rollback_binaries_hint
+		rollback_manual_steps "$rr_prev"
+		return 1
+	fi
+
+	if ! undo_guard; then
+		echo "Error: rollback incomplete: could not put the original Postgres binaries back in '$DATA_DIR', so '$rr_prev' was NOT started (it would fail on the wrong binaries). To finish by hand:" >&2
+		rollback_binaries_hint
+		rollback_manual_steps "$rr_prev"
+		return 1
+	fi
+
+	if ! docker rename "$rr_prev" "$CONTAINER_NAME" >/dev/null 2>&1; then
+		echo "Error: rollback incomplete: could not rename '$rr_prev' back to '$CONTAINER_NAME'. To finish by hand:" >&2
+		rollback_manual_steps "$rr_prev"
+		return 1
+	fi
+	if ! docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1; then
+		echo "Warning: could not restore the restart policy; run: docker update --restart=unless-stopped $CONTAINER_NAME" >&2
+	fi
+	if ! docker start "$CONTAINER_NAME" >/dev/null 2>&1; then
+		echo "Error: rollback incomplete: '$CONTAINER_NAME' was restored but did not start. Check 'docker logs $CONTAINER_NAME', then run: docker start $CONTAINER_NAME" >&2
+		return 1
+	fi
+
+	echo "Rolled back: the original '$CONTAINER_NAME' container was restored and started." >&2
+	return 1
+}
+
+# rollback_binaries_hint
+# Tells the operator how to put the original Postgres binaries back, when
+# guard_installation swapped them and the swap has not been undone.
+rollback_binaries_hint() {
+	[ "$GUARD_SWAPPED" = "1" ] || return 0
+	echo "  # restore the original ($GUARD_HAVE) Postgres binaries (see the installation.<arch> directories in '$DATA_DIR'):"
+	echo "  mv '$DATA_DIR/installation' '$DATA_DIR/installation.$GUARD_WANT'"
+	echo "  mv '$DATA_DIR/installation.$GUARD_HAVE' '$DATA_DIR/installation'"
+} >&2
+
+# rollback_manual_steps PREV
+# The commands that put the previous container PREV back into service.
+rollback_manual_steps() {
+	echo "  docker rename $1 $CONTAINER_NAME"
+	echo "  docker update --restart=unless-stopped $CONTAINER_NAME"
+	echo "  docker start $CONTAINER_NAME"
+} >&2
 
 # docker_ready
 # Returns 0 when the docker CLI exists and the daemon answers.
