@@ -136,7 +136,8 @@ Tell the user what happens next:
   startup.
 - If a container already exists it keeps running with its old settings. To apply
   the new config, run `${CLAUDE_PLUGIN_ROOT}/scripts/ensure-hindsight.sh recreate`
-  (with the API key in the environment or `config.env`). It keeps the old
+  (with the LLM API key, or for a local provider the base URL, in the
+  environment or `config.env`). It keeps the old
   container as `hindsight-prev` for rollback and rolls back automatically if the
   new one does not come up healthy. Or simply start a fresh session if no
   container exists yet.

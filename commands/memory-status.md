@@ -23,7 +23,8 @@ If a line starts with `EMULATED:`, the container image does not match the Docker
 daemon's architecture (it runs under emulation: slower and heavier on memory).
 Tell the user, and explain the fix: run
 `${CLAUDE_PLUGIN_ROOT}/scripts/ensure-hindsight.sh recreate`. It needs the LLM
-API key in the environment or in `~/.config/hindsight-cc/config.env`, keeps the
+API key (or, for a local provider, the base URL) in the environment or in
+`~/.config/hindsight-cc/config.env`, keeps the
 old container as `hindsight-prev` for rollback, and rolls back automatically if
 the new container does not come up healthy. Do not run it without the user's
 go-ahead, because it briefly stops the memory server.

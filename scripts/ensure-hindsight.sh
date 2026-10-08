@@ -44,6 +44,7 @@ EFF_PLATFORM=""
 EFF_MEMORY_LIMIT=""
 
 # Recorded by guard_installation so a failed recreate can undo the swap.
+RECREATING=0
 GUARD_SWAPPED=0
 GUARD_HAVE=""
 GUARD_WANT=""
@@ -130,7 +131,9 @@ config_get() {
 # resolve_config
 # Computes the effective value of each setting with precedence:
 #   explicit env var (set + non-empty) > config.env value > built-in default.
-# The config file is consulted ONLY here, i.e. only when (re)creating.
+# This reads the LLM settings from the config file, and only when (re)creating.
+# resolve_platform and resolve_memory_limit read their own settings from it too
+# (resolve_platform also runs in the debug-only drift check).
 resolve_config() {
 	EFF_PROVIDER="${HINDSIGHT_API_LLM_PROVIDER:-}"
 	[ -n "$EFF_PROVIDER" ] || EFF_PROVIDER=$(config_get HINDSIGHT_API_LLM_PROVIDER)
@@ -389,7 +392,13 @@ create_container() {
 		-v "$DATA_DIR:/home/hindsight/.pg0" \
 		"$HINDSIGHT_IMAGE" 2>&1)
 	run_rc=$?
-	[ "$run_rc" -ne 0 ] && debug "docker run failed (rc=$run_rc): $run_out"
+	if [ "$run_rc" -ne 0 ]; then
+		debug "docker run failed (rc=$run_rc): $run_out"
+		# The operator-run recreate has a human watching; the hook stays quiet.
+		if [ "$RECREATING" = "1" ]; then
+			echo "docker run failed (rc=$run_rc): $run_out" >&2
+		fi
+	fi
 	return "$run_rc"
 }
 
@@ -406,7 +415,7 @@ container_image_arch() {
 # container_exec_failure ID
 # Echoes a short description when the container stopped in a way that means it
 # cannot run here (132 = illegal instruction, 126 = not executable, 127 = not
-# found) or Docker is crash-looping it. A description ending in ", out of
+# found) or Docker is restarting it after a crash (possibly a loop). A description ending in ", out of
 # memory" means Docker's OOM killer was involved. Echoes nothing otherwise.
 container_exec_failure() {
 	cef_state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.Restarting}} {{.State.OOMKilled}}' "$1" 2>/dev/null)
@@ -448,7 +457,7 @@ exec_failure_advice() {
 		efa_msg="$efa_msg It ran out of memory (the limit defaults to 4g). Raise it and recreate: HINDSIGHT_MEMORY_LIMIT=6g $0 recreate (or HINDSIGHT_MEMORY_LIMIT=none for no limit)."
 		;;
 	*)
-		efa_msg="$efa_msg Exit codes 132/126/127 mean the binary could not execute; 'restarting' means it is crash-looping. Check 'docker logs $CONTAINER_NAME'."
+		efa_msg="$efa_msg Exit codes 132/126/127 mean the binary could not execute; 'restarting' means Docker is restarting it after a crash (possibly a loop). Check 'docker logs $CONTAINER_NAME'."
 		if daemon_is_arm64; then
 			efa_msg="$efa_msg On an arm64 host, a fallback is the amd64 image under emulation: HINDSIGHT_PLATFORM=linux/amd64 $0 recreate"
 		else
@@ -462,7 +471,8 @@ exec_failure_advice() {
 # report_platform_drift
 # Debug-only: say so when the existing container's image architecture differs
 # from what this host should run. Read-only, and skipped entirely unless
-# HINDSIGHT_DEBUG is on so the healthy SessionStart path stays one curl.
+# HINDSIGHT_DEBUG is on so this adds no Docker calls to the healthy SessionStart
+# path.
 report_platform_drift() {
 	debug_enabled || return 0
 	rpd_id=$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)
@@ -563,6 +573,12 @@ create_or_recreate() {
 			fi
 			debug "Existing container is missing HINDSIGHT_API_LLM_API_KEY, recreating it"
 			docker rm -f "$container_id" >/dev/null 2>&1
+			# create_container moves Postgres binaries, which is only safe when no
+			# container uses the data directory: confirm the old one is really gone.
+			if [ -n "$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]; then
+				echo "Error: could not remove the existing '$CONTAINER_NAME' container, so it was not recreated (run: docker rm -f $CONTAINER_NAME)" >&2
+				return 1
+			fi
 			create_container
 		else
 			# A container that cannot execute its binary will just crash again;
@@ -615,15 +631,17 @@ recreate_container() {
 	fi
 	resolve_platform
 
-	# A non-numeric wait would abort the shell mid-recreate (after the stop and
-	# rename, with no rollback), so validate it before anything is touched.
+	# A non-numeric wait would abort the shell after the new container is created
+	# (skipping the rollback), so validate it before anything is touched. 0 and
+	# leading-zero values are rejected too (08 is invalid arithmetic; 0 never waits).
 	rc_wait="${HINDSIGHT_RECREATE_WAIT_SECONDS:-180}"
 	case "$rc_wait" in
-	'' | *[!0-9]* | 0?*)
-		debug "Ignoring invalid HINDSIGHT_RECREATE_WAIT_SECONDS '$rc_wait', using 180"
+	'' | *[!0-9]* | 0*)
+		echo "Warning: ignoring invalid HINDSIGHT_RECREATE_WAIT_SECONDS '$rc_wait'; waiting 180s instead" >&2
 		rc_wait=180
 		;;
 	esac
+	warn_ignored_settings
 
 	rc_id=$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)
 	if [ -z "$rc_id" ]; then
@@ -642,7 +660,9 @@ recreate_container() {
 	fi
 	if ! docker rename "$CONTAINER_NAME" "$rc_prev"; then
 		echo "Error: could not rename '$CONTAINER_NAME' to '$rc_prev'" >&2
-		docker start "$CONTAINER_NAME" >/dev/null 2>&1
+		if ! docker start "$CONTAINER_NAME" >/dev/null 2>&1; then
+			echo "Error: '$CONTAINER_NAME' is stopped; run: docker start $CONTAINER_NAME" >&2
+		fi
 		return 1
 	fi
 	# From here on the old container is parked: an interrupt must put it back.
@@ -651,33 +671,89 @@ recreate_container() {
 	# the new container on the same data directory, so this must succeed.
 	if ! docker update --restart=no "$rc_prev" >/dev/null 2>&1; then
 		echo "Error: could not disable restarts on '$rc_prev'" >&2
-		trap - INT TERM HUP
+		# Ignore (not reset) the signals: a Ctrl-C mid-rollback would leave the old
+		# container parked with restarts off and no manual steps printed.
+		trap '' INT TERM HUP
 		recreate_rollback "$rc_prev"
+		trap - INT TERM HUP
 		return 1
 	fi
 
+	RECREATING=1
 	if create_container &&
 		wait_for_ready "$rc_wait" &&
 		verify_container_arch; then
 		trap - INT TERM HUP
-		echo "Recreated '$CONTAINER_NAME' (${EFF_PLATFORM:-docker default platform}). The previous container is kept, stopped, as '$rc_prev' for rollback."
+		if [ "$EFF_MEMORY_LIMIT" = "none" ]; then
+			rc_mem="no memory limit"
+		else
+			rc_mem="memory $EFF_MEMORY_LIMIT"
+		fi
+		echo "Recreated '$CONTAINER_NAME' (${EFF_PLATFORM:-docker default platform}, $rc_mem). The previous container is kept, stopped, as '$rc_prev' for rollback."
+		if [ "$GUARD_SWAPPED" = "1" ]; then
+			echo "The original $GUARD_HAVE Postgres binaries were parked as '$DATA_DIR/installation.$GUARD_HAVE'. Rolling back to '$rc_prev' by hand needs the binaries swapped back first:"
+			rollback_binaries_hint
+		fi
 		return 0
 	fi
 
-	trap - INT TERM HUP
+	trap '' INT TERM HUP
+	report_new_container_failure
 	recreate_rollback "$rc_prev"
+	trap - INT TERM HUP
 	return 1
+}
+
+# warn_ignored_settings
+# Recreate only: say so on stderr when a HINDSIGHT_MEMORY_LIMIT or
+# HINDSIGHT_PLATFORM value (env or config.env) is set but rejected by the
+# validators, and which value is used instead. Call after resolve_platform. The
+# hook path stays debug-only.
+warn_ignored_settings() {
+	resolve_memory_limit
+	for wis_val in "${HINDSIGHT_MEMORY_LIMIT:-}" "$(config_get HINDSIGHT_MEMORY_LIMIT)"; do
+		if [ -n "$wis_val" ] && ! valid_memory_limit "$wis_val"; then
+			echo "Warning: ignoring invalid HINDSIGHT_MEMORY_LIMIT '$wis_val'; using $EFF_MEMORY_LIMIT instead" >&2
+		fi
+	done
+	for wis_val in "${HINDSIGHT_PLATFORM:-}" "$(config_get HINDSIGHT_PLATFORM)"; do
+		case "$wis_val" in
+		'' | linux/arm64 | linux/amd64) ;;
+		*) echo "Warning: ignoring invalid HINDSIGHT_PLATFORM '$wis_val'; using ${EFF_PLATFORM:-the Docker default platform} instead" >&2 ;;
+		esac
+	done
+	return 0
+}
+
+# report_new_container_failure
+# Best-effort: before a failed recreate is rolled back (which removes the new
+# container), print why the new container is unhealthy: the exit diagnosis and
+# its last log lines. Never fails.
+report_new_container_failure() {
+	rnf_why=""
+	if [ -n "$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]; then
+		rnf_why=$(container_exec_failure "$CONTAINER_NAME")
+	fi
+	if [ -n "$rnf_why" ]; then
+		exec_failure_advice "$rnf_why"
+	fi
+	if [ -n "$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)" ]; then
+		echo "Last log lines from the new '$CONTAINER_NAME' container:" >&2
+		docker logs --tail 20 "$CONTAINER_NAME" >&2 2>&1
+	fi
+	return 0
 }
 
 # recreate_rollback PREV
 # Puts the previous container PREV back after a failed recreate, checking each
-# step. The new container must be gone before the Postgres binaries are moved
+# step. A failed restart-policy restore only warns and continues. The new container must be gone before the Postgres binaries are moved
 # back (undo_guard), and the binaries must be back before the old container
 # starts, or it would run on the wrong ones. When a step fails it stops there,
 # says so, and prints the commands to finish by hand. Always returns 1.
 recreate_rollback() {
 	rr_prev="$1"
 	echo "Recreate failed; rolling back to the previous container..." >&2
+	echo "Stopping the new container can take up to 60s; do not interrupt." >&2
 
 	docker stop -t 60 "$CONTAINER_NAME" >/dev/null 2>&1
 	if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then

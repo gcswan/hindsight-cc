@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HINDSIGHT_MEMORY_LIMIT` settings, read from the environment or `config.env`.
   `HINDSIGHT_DATA_DIR` overrides the host directory for the Postgres data
   (default `~/hindsight-data`).
+- `HINDSIGHT_RECREATE_WAIT_SECONDS` (default 180, recreate only): how long
+  `recreate` waits for the new server to answer before rolling back.
 - `ensure-hindsight.sh recreate`: replaces the container with one built from the
   current settings, keeps the old one as `hindsight-prev`, verifies health and
   architecture, and rolls back automatically on failure.
@@ -32,8 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the command line, so it no longer appears in `ps` output.
 - Embedded Postgres binaries of the wrong architecture in the data directory are
   moved aside as `installation.<arch>` (never deleted) when a container is created.
-- A container that exited with code 132, 126 or 127, or is restarting in a loop,
-  is reported with a suggested fix instead of being started again every session.
+- A container that exited with code 132, 126 or 127, or is being restarted by
+  Docker after a crash (possibly a loop), is reported with a suggested fix instead of being started
+  again every session.
 
 ## [2.0.0] - 2026-06-04
 
