@@ -383,6 +383,49 @@ create_container() {
 	return "$run_rc"
 }
 
+# container_image_arch NAME
+# Echoes the architecture (arm64|amd64) of the image NAME was created from, or
+# nothing if it cannot be determined.
+container_image_arch() {
+	cia_img=$(docker inspect -f '{{.Image}}' "$1" 2>/dev/null)
+	[ -n "$cia_img" ] || return 0
+	docker image inspect -f '{{.Architecture}}' "$cia_img" 2>/dev/null
+	return 0
+}
+
+# container_exec_failure ID
+# Echoes a short description when the container stopped in a way that means its
+# binary cannot run here (132 = illegal instruction, 126 = not executable,
+# 127 = not found) or Docker is crash-looping it. Echoes nothing otherwise.
+container_exec_failure() {
+	cef_state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.Restarting}}' "$1" 2>/dev/null)
+	case "$cef_state" in
+	"exited 132 "*) echo "exit code 132" ;;
+	"exited 126 "*) echo "exit code 126" ;;
+	"exited 127 "*) echo "exit code 127" ;;
+	"restarting "*) echo "restarting" ;;
+	esac
+	return 0
+}
+
+# report_platform_drift
+# Debug-only: say so when the existing container's image architecture differs
+# from what this host should run. Read-only, and skipped entirely unless
+# HINDSIGHT_DEBUG is on so the healthy SessionStart path stays one curl.
+report_platform_drift() {
+	debug_enabled || return 0
+	rpd_id=$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)
+	[ -n "$rpd_id" ] || return 0
+
+	resolve_platform
+	rpd_want=$(platform_arch "$EFF_PLATFORM")
+	rpd_have=$(container_image_arch "$rpd_id")
+	if [ -n "$rpd_want" ] && [ -n "$rpd_have" ] && [ "$rpd_want" != "$rpd_have" ]; then
+		debug "Platform drift: container image is $rpd_have but this host should run $rpd_want (run 'ensure-hindsight.sh recreate')"
+	fi
+	return 0
+}
+
 # migrate_legacy_container
 # One-time retirement of the old "hindsight-cc" container name. This runs
 # BEFORE the health probe on purpose: the legacy container may be the very
@@ -453,6 +496,14 @@ create_or_recreate() {
 			docker rm -f "$container_id" >/dev/null 2>&1
 			create_container
 		else
+			# A container that cannot execute its binary will just crash again;
+			# starting it in a loop every session hides that. Say what it means.
+			cef=$(container_exec_failure "$container_id")
+			if [ -n "$cef" ]; then
+				echo "Error: container '$CONTAINER_NAME' is not runnable (state: $cef). Exit codes 132/126/127 mean the binary could not execute and 'restarting' means a crash loop; all point at an image/architecture mismatch. Check 'docker logs $CONTAINER_NAME', then try: HINDSIGHT_PLATFORM=linux/amd64 ensure-hindsight.sh recreate" >&2
+				return 1
+			fi
+
 			debug "Starting existing container"
 			start_out=$(docker start "$container_id" 2>&1)
 			start_rc=$?
@@ -494,6 +545,7 @@ main() {
 	# container — this makes sharing safe regardless of which project started it.
 	if server_healthy; then
 		debug "Server already running"
+		report_platform_drift
 		exit 0
 	fi
 

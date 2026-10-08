@@ -917,6 +917,134 @@ flow_test_create_parks_wrong_arch_installation() {
 	rm -rf "$tmp"
 }
 
+# log_has_mutation LOGFILE
+# True when docker was asked to change anything (as opposed to inspect/list).
+log_has_mutation() {
+	grep -q -E '^(run|rm|start|stop|rename|update) ' "$1" 2>/dev/null
+}
+
+flow_test_exec_failure_is_diagnosed_not_restarted() {
+	for state in "exited 132 false" "exited 126 false" "exited 127 false" "restarting 1 true"; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_l.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+
+		out=$(
+			PATH="$tmp:$PATH" \
+				FAKE_LOG="$log" \
+				FAKE_HEALTH_OK=0 \
+				FAKE_HINDSIGHT_CC_EXISTS=0 \
+				FAKE_HINDSIGHT_EXISTS=1 \
+				FAKE_STATE="$state" \
+				HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+				sh "$SCRIPT" 2>&1
+			echo "exit=$?"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+		assert_eq "flow(l): '$state' exits 1" "1" "$rc"
+		if log_has "start hsid456" "$log"; then
+			fail "flow(l): '$state' must NOT be started again"
+		else
+			pass "flow(l): '$state' is not started again"
+		fi
+		case "$out" in
+		*"not runnable"*"recreate"*) pass "flow(l): '$state' prints a diagnosis naming recreate" ;;
+		*) fail "flow(l): '$state' expected a 'not runnable ... recreate' diagnosis, got: $out" ;;
+		esac
+
+		rm -rf "$tmp"
+	done
+
+	# Any other exit code (a normal stop, a kill) is still just started.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_l2.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	out=$(
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_STATE="exited 137 false" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+	assert_eq "flow(l): exit code 137 still starts the container" "0" "$rc"
+	if log_has "start hsid456" "$log"; then
+		pass "flow(l): exit code 137 is started"
+	else
+		fail "flow(l): expected 'docker start hsid456' for exit code 137"
+	fi
+	rm -rf "$tmp"
+}
+
+flow_test_drift_is_reported_only_in_debug() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_m.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+
+	# Server healthy, container image is amd64 on an arm64 daemon.
+	: >"$log"
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_HEALTH_OK=1 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			FAKE_IMAGE_ARCH=amd64 \
+			HINDSIGHT_DEBUG=1 \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT" 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+	assert_eq "flow(m): healthy server with drift exits 0" "0" "$rc"
+	case "$out" in
+	*"Platform drift"*"amd64"*"arm64"*) pass "flow(m): debug output reports the drift" ;;
+	*) fail "flow(m): expected a 'Platform drift' debug line, got: $out" ;;
+	esac
+	if log_has_mutation "$log"; then
+		fail "flow(m): reporting drift must not change any container"
+	else
+		pass "flow(m): reporting drift changes nothing"
+	fi
+
+	# Without debug the healthy path must not even inspect the container.
+	: >"$log"
+	out=$(
+		unset HINDSIGHT_PLATFORM HINDSIGHT_DEBUG
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_HEALTH_OK=1 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			FAKE_IMAGE_ARCH=amd64 \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT" 2>&1
+		echo "exit=$?"
+	)
+	case "$out" in
+	*"Platform drift"*) fail "flow(m): drift must not be reported without HINDSIGHT_DEBUG" ;;
+	*) pass "flow(m): no drift output without HINDSIGHT_DEBUG" ;;
+	esac
+	if log_has "image inspect" "$log"; then
+		fail "flow(m): the healthy path must not inspect images without HINDSIGHT_DEBUG"
+	else
+		pass "flow(m): the healthy path stays inspection-free without HINDSIGHT_DEBUG"
+	fi
+
+	rm -rf "$tmp"
+}
+
 # ---------------------------------------------------------------------------
 
 echo "=== config parser tests ==="
@@ -940,6 +1068,8 @@ flow_test_create_flags
 flow_test_memory_limit_override
 flow_test_unknown_arch_omits_platform
 flow_test_create_parks_wrong_arch_installation
+flow_test_exec_failure_is_diagnosed_not_restarted
+flow_test_drift_is_reported_only_in_debug
 flow_test_key_with_shell_metacharacters
 
 echo ""
