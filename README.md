@@ -183,6 +183,12 @@ variable or via `~/.config/hindsight-cc/config.env` (written by
 | `HINDSIGHT_API_LLM_BASE_URL`| LLM base URL (local providers / custom endpoints) | (unset)                            |
 | `HINDSIGHT_DEBUG`           | Enable debug logging (`1`, `true`, or `yes`) | (disabled)                              |
 | `HINDSIGHT_IMAGE`           | Docker image for Hindsight server            | `ghcr.io/vectorize-io/hindsight:0.8.6` |
+| `HINDSIGHT_PLATFORM`        | Docker platform for the container: `linux/arm64` or `linux/amd64` | the Docker daemon's architecture |
+| `HINDSIGHT_MEMORY_LIMIT`    | Container memory limit (`4g`, `4096m`, ...) or `none` | `4g`                                    |
+| `HINDSIGHT_DATA_DIR`        | Host directory for the embedded Postgres data | `~/hindsight-data`                      |
+
+The platform, memory limit and data directory settings are read when the
+container is created or recreated.
 
 ### Data Storage
 
@@ -254,6 +260,35 @@ Restart the server:
 ```bash
 docker restart hindsight
 ```
+
+### Architecture and Emulation
+
+`/hindsight-cc:memory-status` shows the container's image architecture next to
+the Docker daemon's. An `EMULATED:` line means the container runs under
+emulation (for example an amd64 image on an Apple Silicon Mac), which is slower
+and uses more memory. The plugin always passes `--platform` explicitly when it
+creates the container, so this only happens to containers created some other way
+or forced with `HINDSIGHT_PLATFORM`.
+
+To replace the container with one built from the current settings:
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/scripts/ensure-hindsight.sh recreate
+```
+
+It needs the LLM API key in the environment or in `config.env` (pass it from
+your secret manager for that one command; never write it into a file in this
+repo). It stops the server cleanly, keeps the old container stopped as
+`hindsight-prev`, creates and verifies the new one, and rolls back automatically
+on failure. Remove `hindsight-prev` with `docker rm hindsight-prev` once you are
+satisfied. If a recreate is interrupted, `docker ps -a` shows `hindsight-prev`;
+`docker rename hindsight-prev hindsight && docker start hindsight` restores it.
+
+If the container exits with code 132 (illegal instruction) or restarts in a loop,
+the session start reports it instead of retrying forever. As a fallback you can
+run the amd64 image under emulation with
+`HINDSIGHT_PLATFORM=linux/amd64 ensure-hindsight.sh recreate`, and please report
+the Docker Desktop version and `docker logs hindsight` output.
 
 ## Testing
 

@@ -134,9 +134,12 @@ Tell the user what happens next:
 
 - The config is read when the Hindsight container is next CREATED, not on every
   startup.
-- If a container already exists, they may need to remove it and let the plugin
-  recreate it: `docker rm -f hindsight` — or simply start a fresh Claude Code
-  session. On the next create, `ensure-hindsight.sh` picks up the new config.
+- If a container already exists it keeps running with its old settings. To apply
+  the new config, run `${CLAUDE_PLUGIN_ROOT}/scripts/ensure-hindsight.sh recreate`
+  (with the API key in the environment or `config.env`). It keeps the old
+  container as `hindsight-prev` for rollback and rolls back automatically if the
+  new one does not come up healthy. Or simply start a fresh session if no
+  container exists yet.
 - The very first session before setup may have had no memory configured. That
   is expected; rerun this command after setup and start a new session so the
   container is created with the chosen provider.
