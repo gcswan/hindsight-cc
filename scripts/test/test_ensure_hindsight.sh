@@ -136,7 +136,9 @@ config_parser_tests() {
 #   FAKE_DAEMON_ARCH          what `docker info` reports as the architecture
 #   FAKE_IMAGE_ARCH           what `docker image inspect` reports (default arm64)
 #   FAKE_STATE                `State.Status ExitCode Restarting` (default "exited 0 false")
-#   FAKE_PREV_EXISTS          docker ps reports the rollback container when "1"
+#   FAKE_OOM                  `State.OOMKilled` appended to FAKE_STATE (default "false")
+#   FAKE_CURL_SIGNAL          curl sends this signal (e.g. TERM) to its parent, then fails
+#   FAKE_PREV_EXISTS         docker ps reports the rollback container when "1"
 #   FAKE_RUN_KEY_FILE         file that receives the API key docker run inherited
 #   FAKE_STOP_FAIL            `docker stop` fails when "1"
 #   FAKE_RENAME_FAIL          `docker rename` fails when "1"
@@ -229,7 +231,7 @@ inspect)
 		echo "sha256:fakeimage"
 		;;
 	*"{{.State.Status}}"*)
-		echo "${FAKE_STATE:-exited 0 false}"
+		echo "${FAKE_STATE:-exited 0 false} ${FAKE_OOM:-false}"
 		;;
 	*)
 		# Emit an EMPTY API key (the recreate path) when FAKE_MISSING_KEY=1,
@@ -263,7 +265,12 @@ EOF
 	cat >"$dir/curl" <<'EOF'
 #!/bin/sh
 # Health passes once the server has been "started" (marker exists), else honor
-# FAKE_HEALTH_OK.
+# FAKE_HEALTH_OK. FAKE_CURL_SIGNAL=TERM makes it signal its parent (the script's
+# shell, since curl is called directly from wait_for_ready) and then fail.
+if [ -n "${FAKE_CURL_SIGNAL:-}" ]; then
+	kill -"$FAKE_CURL_SIGNAL" "$PPID"
+	exit 1
+fi
 if [ -n "${FAKE_MARKER:-}" ] && [ -f "$FAKE_MARKER" ]; then
 	exit 0
 fi
@@ -1022,6 +1029,76 @@ flow_test_exec_failure_is_diagnosed_not_restarted() {
 	rm -rf "$tmp"
 }
 
+# exec_diag STATE OOM DAEMON_ARCH
+# Runs the hook path against an existing container in STATE and prints the
+# combined output plus `exit=N`.
+exec_diag() {
+	ed_tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_m.XXXXXX")
+	build_shims "$ed_tmp"
+	: >"$ed_tmp/docker.log"
+	PATH="$ed_tmp:$PATH" \
+		FAKE_LOG="$ed_tmp/docker.log" \
+		FAKE_HEALTH_OK=0 \
+		FAKE_HINDSIGHT_CC_EXISTS=0 \
+		FAKE_HINDSIGHT_EXISTS=1 \
+		FAKE_STATE="$1" \
+		FAKE_OOM="$2" \
+		FAKE_DAEMON_ARCH="$3" \
+		HINDSIGHT_CONFIG_FILE="$ed_tmp/none.env" \
+		sh "$SCRIPT" 2>&1
+	echo "exit=$?"
+	rm -rf "$ed_tmp"
+}
+
+flow_test_exec_failure_advice_depends_on_cause() {
+	# (1) An OOM-killed restart loop: raise the memory limit, never advise amd64
+	# (that image needs MORE memory).
+	out=$(exec_diag "restarting 137 true" true aarch64)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+	assert_eq "flow(m): OOM restart loop exits 1" "1" "$rc"
+	case "$out" in
+	*"restarting, last exit code 137, out of memory"*) pass "flow(m): OOM restart loop reports the last exit code and OOM" ;;
+	*) fail "flow(m): expected the state to include the exit code and OOM, got: $out" ;;
+	esac
+	case "$out" in
+	*"HINDSIGHT_MEMORY_LIMIT=6g"*"recreate"*) pass "flow(m): OOM restart loop advises raising the memory limit" ;;
+	*) fail "flow(m): expected memory-limit advice, got: $out" ;;
+	esac
+	case "$out" in
+	*"linux/amd64"*) fail "flow(m): OOM must not advise amd64, got: $out" ;;
+	*) pass "flow(m): OOM does not advise amd64 even on an arm64 daemon" ;;
+	esac
+
+	# (2) Exit 132 on an amd64 daemon: no platform advice.
+	out=$(exec_diag "exited 132 false" false x86_64)
+	case "$out" in
+	*"linux/amd64"*) fail "flow(m): exit 132 on an amd64 daemon must not advise amd64, got: $out" ;;
+	*) pass "flow(m): exit 132 on an amd64 daemon gives no amd64 advice" ;;
+	esac
+	case "$out" in
+	*"docker logs hindsight"*) pass "flow(m): exit 132 points at the container logs" ;;
+	*) fail "flow(m): expected a docker logs pointer, got: $out" ;;
+	esac
+
+	# (3) Exit 132 on an arm64 daemon: the emulation fallback is still offered.
+	out=$(exec_diag "exited 132 false" false aarch64)
+	case "$out" in
+	*"HINDSIGHT_PLATFORM=linux/amd64"*"recreate"*) pass "flow(m): exit 132 on an arm64 daemon offers the amd64 fallback" ;;
+	*) fail "flow(m): expected the amd64 fallback on arm64, got: $out" ;;
+	esac
+
+	# (4) A non-OOM restart loop reports its exit code; the script is named by $0.
+	out=$(exec_diag "restarting 1 true" false aarch64)
+	case "$out" in
+	*"restarting, last exit code 1)"*) pass "flow(m): a non-OOM restart loop reports its exit code" ;;
+	*) fail "flow(m): expected 'restarting, last exit code 1', got: $out" ;;
+	esac
+	case "$out" in
+	*"$SCRIPT recreate"*) pass "flow(m): advice names the script by its invoked path" ;;
+	*) fail "flow(m): expected '$SCRIPT recreate' in the advice, got: $out" ;;
+	esac
+}
+
 flow_test_drift_is_reported_only_in_debug() {
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_m.XXXXXX")
 	build_shims "$tmp"
@@ -1260,6 +1337,88 @@ flow_test_recreate_rolls_back() {
 	done
 }
 
+flow_test_recreate_interrupted_rolls_back() {
+	# (g) A signal during the wait (after the old container was renamed away)
+	# must roll back, exit 130, and never claim success. TERM is used rather
+	# than INT because a test runner may start us with SIGINT ignored, which
+	# cannot be trapped; the script installs the same handler for INT/TERM/HUP.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_g.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+	mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_IMAGE_ARCH=arm64
+		FAKE_CURL_SIGNAL=TERM
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_CURL_SIGNAL HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+		recreate_run "$tmp"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "recreate(g): an interrupt exits 130" "130" "$rc"
+	assert_eq "recreate(g): an interrupt stops and removes the new one, restores the binaries, then renames back and starts" \
+		"stop -t 60 hindsight|rm hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation 3e00|" \
+		"$(rollback_seq "$log")"
+	assert_eq "recreate(g): the amd64 binaries are back in place" "amd64" \
+		"$(elf_arch "$data/installation/18.1.0/bin/postgres")"
+	case "$out" in
+	*"Recreate interrupted"*) pass "recreate(g): says the recreate was interrupted" ;;
+	*) fail "recreate(g): expected 'Recreate interrupted', got: $out" ;;
+	esac
+	case "$out" in
+	*"Recreated '"*) fail "recreate(g): an interrupted recreate must not report success, got: $out" ;;
+	*) pass "recreate(g): no success message" ;;
+	esac
+
+	rm -rf "$tmp"
+}
+
+flow_test_recreate_nonnumeric_wait() {
+	# (h) A value like "3m" must fall back to the default, not abort the shell
+	# between the rename and the create.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_h.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" arm64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_IMAGE_ARCH=arm64
+		FAKE_MARKER="$tmp/started.marker"
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_MARKER HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			HINDSIGHT_RECREATE_WAIT_SECONDS=3m \
+			sh "$SCRIPT" recreate 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "recreate(h): a non-numeric wait still recreates (exit 0)" "0" "$rc"
+	if log_has "run -d --name hindsight " "$log"; then
+		pass "recreate(h): the new container was created"
+	else
+		fail "recreate(h): expected docker run, got: $out"
+	fi
+
+	rm -rf "$tmp"
+}
+
 flow_test_recreate_command_failures() {
 	# `docker stop` failing must abort before anything is renamed or created;
 	# `docker rename` failing must put the original container back to work.
@@ -1432,6 +1591,7 @@ flow_test_memory_limit_override
 flow_test_unknown_arch_omits_platform
 flow_test_create_parks_wrong_arch_installation
 flow_test_exec_failure_is_diagnosed_not_restarted
+flow_test_exec_failure_advice_depends_on_cause
 flow_test_drift_is_reported_only_in_debug
 flow_test_key_with_shell_metacharacters
 
@@ -1439,6 +1599,8 @@ echo "=== recreate ==="
 flow_test_recreate_success
 flow_test_recreate_refusals
 flow_test_recreate_rolls_back
+flow_test_recreate_interrupted_rolls_back
+flow_test_recreate_nonnumeric_wait
 flow_test_recreate_command_failures
 flow_test_recreate_rollback_failures
 flow_test_recreate_and_usage_edges

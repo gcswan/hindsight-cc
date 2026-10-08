@@ -401,18 +401,59 @@ container_image_arch() {
 }
 
 # container_exec_failure ID
-# Echoes a short description when the container stopped in a way that means its
-# binary cannot run here (132 = illegal instruction, 126 = not executable,
-# 127 = not found) or Docker is crash-looping it. Echoes nothing otherwise.
+# Echoes a short description when the container stopped in a way that means it
+# cannot run here (132 = illegal instruction, 126 = not executable, 127 = not
+# found) or Docker is crash-looping it. A description ending in ", out of
+# memory" means Docker's OOM killer was involved. Echoes nothing otherwise.
 container_exec_failure() {
-	cef_state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.Restarting}}' "$1" 2>/dev/null)
-	case "$cef_state" in
-	"exited 132 "*) echo "exit code 132" ;;
-	"exited 126 "*) echo "exit code 126" ;;
-	"exited 127 "*) echo "exit code 127" ;;
-	"restarting "*) echo "restarting" ;;
+	cef_state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.Restarting}} {{.State.OOMKilled}}' "$1" 2>/dev/null)
+	# Word-split on purpose: status, exit code, restarting, OOMKilled.
+	# shellcheck disable=SC2086
+	set -- $cef_state
+	cef_oom=""
+	if [ "${4:-}" = "true" ]; then
+		cef_oom=", out of memory"
+	fi
+	case "${1:-} ${2:-}" in
+	"exited 132") echo "exit code 132${cef_oom}" ;;
+	"exited 126") echo "exit code 126${cef_oom}" ;;
+	"exited 127") echo "exit code 127${cef_oom}" ;;
+	"restarting "*) echo "restarting, last exit code ${2:-unknown}${cef_oom}" ;;
 	esac
 	return 0
+}
+
+# daemon_is_arm64
+# True when the Docker daemon reports an arm64 architecture.
+daemon_is_arm64() {
+	dia_arch=$(docker info --format '{{.Architecture}}' 2>/dev/null)
+	case "$dia_arch" in
+	aarch64 | arm64) return 0 ;;
+	esac
+	return 1
+}
+
+# exec_failure_advice DESCRIPTION
+# Prints the operator-facing explanation for a non-runnable container, worded
+# by cause: an out-of-memory kill needs a bigger limit (the amd64 image uses
+# MORE memory, so it is never advised there); anything else points at the logs
+# and offers the amd64 emulation fallback only on an arm64 daemon.
+exec_failure_advice() {
+	efa_msg="Error: container '$CONTAINER_NAME' is not runnable (state: $1)."
+	case "$1" in
+	*"out of memory"*)
+		efa_msg="$efa_msg It ran out of memory (the limit defaults to 4g). Raise it and recreate: HINDSIGHT_MEMORY_LIMIT=6g $0 recreate (or HINDSIGHT_MEMORY_LIMIT=none for no limit)."
+		;;
+	*)
+		efa_msg="$efa_msg Exit codes 132/126/127 mean the binary could not execute; 'restarting' means it is crash-looping. Check 'docker logs $CONTAINER_NAME'."
+		if daemon_is_arm64; then
+			efa_msg="$efa_msg On an arm64 host, a fallback is the amd64 image under emulation: HINDSIGHT_PLATFORM=linux/amd64 $0 recreate"
+		else
+			efa_msg="$efa_msg Once the cause is fixed, replace the container with: $0 recreate"
+		fi
+		;;
+	esac
+	echo "$efa_msg" >&2
 }
 
 # report_platform_drift
@@ -525,7 +566,7 @@ create_or_recreate() {
 			# starting it in a loop every session hides that. Say what it means.
 			cef=$(container_exec_failure "$container_id")
 			if [ -n "$cef" ]; then
-				echo "Error: container '$CONTAINER_NAME' is not runnable (state: $cef). Exit codes 132/126/127 mean the binary could not execute and 'restarting' means a crash loop; all point at an image/architecture mismatch. Check 'docker logs $CONTAINER_NAME', then try: HINDSIGHT_PLATFORM=linux/amd64 ensure-hindsight.sh recreate" >&2
+				exec_failure_advice "$cef"
 				return 1
 			fi
 
@@ -571,6 +612,16 @@ recreate_container() {
 	fi
 	resolve_platform
 
+	# A non-numeric wait would abort the shell mid-recreate (after the stop and
+	# rename, with no rollback), so validate it before anything is touched.
+	rc_wait="${HINDSIGHT_RECREATE_WAIT_SECONDS:-180}"
+	case "$rc_wait" in
+	'' | *[!0-9]*)
+		debug "Ignoring invalid HINDSIGHT_RECREATE_WAIT_SECONDS '$rc_wait', using 180"
+		rc_wait=180
+		;;
+	esac
+
 	rc_id=$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)
 	if [ -z "$rc_id" ]; then
 		echo "Error: no '$CONTAINER_NAME' container to recreate (run without arguments to create one)" >&2
@@ -591,21 +642,26 @@ recreate_container() {
 		docker start "$CONTAINER_NAME" >/dev/null 2>&1
 		return 1
 	fi
+	# From here on the old container is parked: an interrupt must put it back.
+	trap 'echo "Recreate interrupted." >&2; recreate_rollback "$rc_prev"; exit 130' INT TERM HUP
 	# A rollback copy that can restart on its own could end up running beside
 	# the new container on the same data directory, so this must succeed.
 	if ! docker update --restart=no "$rc_prev" >/dev/null 2>&1; then
 		echo "Error: could not disable restarts on '$rc_prev'" >&2
+		trap - INT TERM HUP
 		recreate_rollback "$rc_prev"
 		return 1
 	fi
 
 	if create_container &&
-		wait_for_ready "${HINDSIGHT_RECREATE_WAIT_SECONDS:-180}" &&
+		wait_for_ready "$rc_wait" &&
 		verify_container_arch; then
+		trap - INT TERM HUP
 		echo "Recreated '$CONTAINER_NAME' (${EFF_PLATFORM:-docker default platform}). The previous container is kept, stopped, as '$rc_prev' for rollback."
 		return 0
 	fi
 
+	trap - INT TERM HUP
 	recreate_rollback "$rc_prev"
 	return 1
 }

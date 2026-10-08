@@ -143,8 +143,9 @@ then `docker image inspect -f '{{.Architecture}}'`) and `platform_drift`
 
 ### D4. `ensure-hindsight.sh recreate` (explicit, never run by hooks)
 
-1. `docker stop -t 60 hindsight`.
-2. Refuse if `hindsight-prev` already exists (never auto-delete rollback state).
+1. Refuse if `hindsight-prev` already exists (never auto-delete rollback state);
+   a refusal never takes the server down.
+2. `docker stop -t 60 hindsight`.
 3. `docker rename hindsight hindsight-prev`. The old container is kept, stopped,
    as the rollback target. Two containers must never run on the same data dir.
 4. **pg0 installation guard.** Read `~/hindsight-data/installation/*/bin/postgres`

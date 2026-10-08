@@ -273,22 +273,37 @@ or forced with `HINDSIGHT_PLATFORM`.
 To replace the container with one built from the current settings:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/ensure-hindsight.sh recreate
+sh <plugin-dir>/scripts/ensure-hindsight.sh recreate
 ```
+
+`<plugin-dir>` is where Claude Code installed the plugin (or a clone of this
+repository); run this from your own terminal.
 
 It needs the LLM API key in the environment or in `config.env` (pass it from
 your secret manager for that one command; never write it into a file in this
 repo). It stops the server cleanly, keeps the old container stopped as
 `hindsight-prev`, creates and verifies the new one, and rolls back automatically
-on failure. Remove `hindsight-prev` with `docker rm hindsight-prev` once you are
-satisfied. If a recreate is interrupted, `docker ps -a` shows `hindsight-prev`;
-`docker rename hindsight-prev hindsight && docker start hindsight` restores it.
+on failure or if it is interrupted (Ctrl-C, TERM, HUP). Remove `hindsight-prev`
+with `docker rm hindsight-prev` once you are satisfied. If it was killed hard
+(for example SIGKILL) and `hindsight-prev` is still there, restore by hand, in
+this order:
 
-If the container exits with code 132 (illegal instruction) or restarts in a loop,
-the session start reports it instead of retrying forever. As a fallback you can
-run the amd64 image under emulation with
-`HINDSIGHT_PLATFORM=linux/amd64 ensure-hindsight.sh recreate`, and please report
-the Docker Desktop version and `docker logs hindsight` output.
+1. `docker rm -f hindsight` (only if a new one exists).
+2. If an `installation.<arch>` directory was parked in the data directory, move
+   the binaries back: `installation` to `installation.<new arch>`, then
+   `installation.<old arch>` to `installation`.
+3. `docker rename hindsight-prev hindsight`
+4. `docker update --restart=unless-stopped hindsight`
+5. `docker start hindsight`
+
+If the container exits with code 132 (illegal instruction) or crash-loops, the
+session start reports it instead of retrying forever; check
+`docker logs hindsight`. If Docker killed it for running out of memory, raise the
+limit: `HINDSIGHT_MEMORY_LIMIT=6g sh <plugin-dir>/scripts/ensure-hindsight.sh recreate`
+(or `none`). On an Apple Silicon (arm64) host, a fallback for exit 132 is the
+amd64 image under emulation, which uses more memory:
+`HINDSIGHT_PLATFORM=linux/amd64 sh <plugin-dir>/scripts/ensure-hindsight.sh recreate`.
+Please report the Docker Desktop version and `docker logs hindsight` output.
 
 ## Testing
 
