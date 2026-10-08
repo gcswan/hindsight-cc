@@ -585,6 +585,182 @@ resolution_tests() {
 	rm -rf "$tmp"
 }
 
+flow_test_create_flags() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_h.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	keyfile="$tmp/run-key"
+	printf 'HINDSIGHT_API_LLM_API_KEY=s3cret-from-config\n' >"$tmp/config.env"
+
+	# No container exists and the server is down, so the create path runs. The
+	# API key comes ONLY from config.env, never from the caller's environment.
+	out=$(
+		unset HINDSIGHT_API_LLM_API_KEY HINDSIGHT_MEMORY_LIMIT HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_RUN_KEY_FILE="$keyfile" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			HINDSIGHT_CONFIG_FILE="$tmp/config.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(h): create exits 0" "0" "$rc"
+	for flag in \
+		"--platform linux/arm64" \
+		"--restart unless-stopped" \
+		"--stop-timeout 40" \
+		"--shm-size=2g" \
+		"--memory 4g" \
+		"--memory-swap 4g" \
+		"--health-cmd curl -sf http://localhost:8888/health" \
+		"--health-interval 30s" \
+		"--health-start-period 120s" \
+		"--log-opt max-size=10m" \
+		"--log-opt max-file=3" \
+		"-e HINDSIGHT_API_WORKER_ID=hindsight-local"; do
+		if log_has "$flag" "$log"; then
+			pass "flow(h): docker run has '$flag'"
+		else
+			fail "flow(h): docker run is missing '$flag'"
+		fi
+	done
+	if log_has "s3cret-from-config" "$log"; then
+		fail "flow(h): the API key value must NOT appear in docker's argv"
+	else
+		pass "flow(h): the API key value is absent from docker's argv"
+	fi
+	if log_has "HINDSIGHT_API_LLM_API_KEY=" "$log"; then
+		fail "flow(h): the API key must be passed by name, not NAME=value"
+	else
+		pass "flow(h): the API key is passed by name only"
+	fi
+	if log_has "-e HINDSIGHT_API_LLM_API_KEY " "$log"; then
+		pass "flow(h): bare -e HINDSIGHT_API_LLM_API_KEY is present"
+	else
+		fail "flow(h): expected a bare '-e HINDSIGHT_API_LLM_API_KEY'"
+	fi
+	assert_eq "flow(h): docker inherits the key from the environment" \
+		"s3cret-from-config" "$(cat "$keyfile" 2>/dev/null)"
+
+	rm -rf "$tmp"
+}
+
+flow_test_memory_limit_override() {
+	for lim in 6g none; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_i.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+
+		out=$(
+			unset HINDSIGHT_PLATFORM
+			PATH="$tmp:$PATH" \
+				FAKE_LOG="$log" \
+				FAKE_MARKER="$tmp/started.marker" \
+				FAKE_HEALTH_OK=0 \
+				FAKE_HINDSIGHT_CC_EXISTS=0 \
+				FAKE_HINDSIGHT_EXISTS=0 \
+				HINDSIGHT_API_LLM_API_KEY="test-key" \
+				HINDSIGHT_MEMORY_LIMIT="$lim" \
+				HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+				sh "$SCRIPT"
+			echo "exit=$?"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+		assert_eq "flow(i): HINDSIGHT_MEMORY_LIMIT=$lim creates the container" "0" "$rc"
+		if [ "$lim" = "none" ]; then
+			if log_has "--memory " "$log" || log_has "--memory-swap" "$log"; then
+				fail "flow(i): 'none' must pass no memory flags"
+			else
+				pass "flow(i): 'none' passes no memory flags"
+			fi
+		elif log_has "--memory $lim" "$log" && log_has "--memory-swap $lim" "$log"; then
+			pass "flow(i): $lim is passed as --memory and --memory-swap"
+		else
+			fail "flow(i): expected --memory $lim and --memory-swap $lim"
+		fi
+
+		rm -rf "$tmp"
+	done
+}
+
+flow_test_unknown_arch_omits_platform() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_j.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+
+	# `docker info` reports no architecture: keep today's behavior (no flag).
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			HINDSIGHT_API_LLM_API_KEY="test-key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(j): unknown architecture still creates the container" "0" "$rc"
+	if log_has "--platform" "$log"; then
+		fail "flow(j): no --platform when the architecture is unknown"
+	else
+		pass "flow(j): no --platform when the architecture is unknown"
+	fi
+
+	rm -rf "$tmp"
+}
+
+flow_test_key_with_shell_metacharacters() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_n.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	keyfile="$tmp/run-key"
+
+	# Real keys can contain characters the shell treats specially. The value must
+	# reach docker intact (through the environment) and must never be in argv.
+	key='ab c"d$HOME;e&f|g`h'
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_RUN_KEY_FILE="$keyfile" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			HINDSIGHT_API_LLM_API_KEY="$key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(n): a key with shell metacharacters creates the container" "0" "$rc"
+	assert_eq "flow(n): the key arrives intact through the environment" "$key" "$(cat "$keyfile" 2>/dev/null)"
+	if log_has 'ab c' "$log"; then
+		fail "flow(n): the key must not appear in docker's argv"
+	else
+		pass "flow(n): the key is absent from docker's argv"
+	fi
+
+	rm -rf "$tmp"
+}
+
 # ---------------------------------------------------------------------------
 
 echo "=== config parser tests ==="
@@ -601,6 +777,10 @@ flow_test_migration_noop_when_both_exist
 flow_test_local_provider_no_key
 flow_test_no_key_aborts_without_create
 flow_test_no_docker
+flow_test_create_flags
+flow_test_memory_limit_override
+flow_test_unknown_arch_omits_platform
+flow_test_key_with_shell_metacharacters
 
 echo ""
 echo "=== summary: $PASS_COUNT passed, $FAIL_COUNT failed ==="

@@ -217,39 +217,65 @@ container_missing_api_key() {
 
 create_container() {
 	debug "Creating Hindsight container"
-	mkdir -p ~/hindsight-data
+	mkdir -p "$DATA_DIR"
+
+	resolve_platform
+	resolve_memory_limit
 
 	HINDSIGHT_IMAGE="${HINDSIGHT_IMAGE:-$HINDSIGHT_IMAGE_DEFAULT}"
-	debug "Starting new container with image ${HINDSIGHT_IMAGE}"
+	debug "Starting new container with image ${HINDSIGHT_IMAGE} (platform: ${EFF_PLATFORM:-docker default})"
 	debug "Starting Hindsight with model: ${EFF_MODEL}"
 
+	# Optional pieces accumulate in the positional params so the docker run
+	# below stays one readable command.
+	set --
+	if [ -n "$EFF_PLATFORM" ]; then
+		set -- "$@" --platform "$EFF_PLATFORM"
+	fi
+	if [ "$EFF_MEMORY_LIMIT" != "none" ]; then
+		set -- "$@" --memory "$EFF_MEMORY_LIMIT" --memory-swap "$EFF_MEMORY_LIMIT"
+	fi
 	# Pass the optional API key and base URL only when resolved; never pass an
 	# empty one. Omitting an empty key matters: a container created with an empty
 	# HINDSIGHT_API_LLM_API_KEY= env would be flagged as "missing key" on the next
 	# run and recreated every session (an infinite loop for local providers, which
-	# legitimately have no key). Accumulate via positional params to stay DRY.
-	set --
+	# legitimately have no key).
 	if [ -n "$EFF_API_KEY" ]; then
-		set -- "$@" -e HINDSIGHT_API_LLM_API_KEY="$EFF_API_KEY"
+		# Bare name: docker forwards the value from OUR environment (set on the
+		# docker command below), so the secret never appears in argv or `ps`.
+		set -- "$@" -e HINDSIGHT_API_LLM_API_KEY
 	fi
 	if [ -n "$EFF_BASE_URL" ]; then
 		set -- "$@" -e HINDSIGHT_API_LLM_BASE_URL="$EFF_BASE_URL"
 	fi
 
-	# Embedded Postgres builds a to_tsvector GENERATED column during migrations,
-	# needing >500MB shared memory; Docker's default 64MB /dev/shm causes DiskFull
-	# crashes on first start/upgrade.
+	# Why each flag:
+	#   --restart unless-stopped   comes back after a Docker/host restart (docs).
+	#   --stop-timeout 40          the image's shutdown trap waits up to 30s for
+	#                              Postgres to flush WAL; Docker's default is 10s.
+	#   --shm-size=2g              embedded Postgres builds a to_tsvector GENERATED
+	#                              column during migrations, needing >500MB shared
+	#                              memory; the 64MB default causes DiskFull crashes.
+	#   --health-*                 the image has no HEALTHCHECK; it ships curl.
+	#   --log-opt                  bound the json-file log (a crash loop is noisy).
+	#   HINDSIGHT_API_WORKER_ID    stable across recreates (docs recommend it).
 	# Capture combined output (instead of discarding it) so that, on failure,
 	# the cause (port already bound, image pull error, OOM, bad flag) is
 	# recoverable via HINDSIGHT_DEBUG rather than silently lost. The success
 	# stdout (the container id) is unused, so capturing it is harmless.
-	run_out=$(docker run -d --name "$CONTAINER_NAME" \
+	run_out=$(HINDSIGHT_API_LLM_API_KEY="$EFF_API_KEY" docker run -d --name "$CONTAINER_NAME" \
+		--restart unless-stopped \
+		--stop-timeout 40 \
 		--shm-size=2g \
+		--health-cmd "curl -sf http://localhost:8888/health" \
+		--health-interval 30s --health-timeout 5s --health-retries 3 --health-start-period 120s \
+		--log-opt max-size=10m --log-opt max-file=3 \
 		-p 8888:8888 -p 9999:9999 \
 		-e HINDSIGHT_API_LLM_MODEL="$EFF_MODEL" \
 		-e HINDSIGHT_API_LLM_PROVIDER="$EFF_PROVIDER" \
+		-e HINDSIGHT_API_WORKER_ID="$WORKER_ID" \
 		"$@" \
-		-v "$HOME/hindsight-data:/home/hindsight/.pg0" \
+		-v "$DATA_DIR:/home/hindsight/.pg0" \
 		"$HINDSIGHT_IMAGE" 2>&1)
 	run_rc=$?
 	[ "$run_rc" -ne 0 ] && debug "docker run failed (rc=$run_rc): $run_out"
