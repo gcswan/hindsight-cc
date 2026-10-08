@@ -6,6 +6,13 @@
 # v2: the plugin uses a single SHARED Docker container named "hindsight" so
 # sibling projects (e.g. pi-ndsight) can share one server + one data volume.
 # A one-time migration retires the old "hindsight-cc" container name.
+#
+# Usage:
+#   ensure-hindsight.sh            ensure the server is up (what the hook runs)
+#   ensure-hindsight.sh recreate   replace the container with a fresh one built
+#                                  from the current settings, keeping the old
+#                                  one as "hindsight-prev" for rollback. Run it
+#                                  by hand; hooks never call it.
 
 CONTAINER_NAME="hindsight"
 LEGACY_CONTAINER_NAME="hindsight-cc"
@@ -426,6 +433,22 @@ report_platform_drift() {
 	return 0
 }
 
+# verify_container_arch
+# After a recreate: the new container's image must be the architecture that was
+# asked for. Passes when no platform was resolved (nothing to compare).
+verify_container_arch() {
+	vca_want=$(platform_arch "$EFF_PLATFORM")
+	[ -n "$vca_want" ] || return 0
+
+	vca_have=$(container_image_arch "$CONTAINER_NAME")
+	if [ "$vca_have" = "$vca_want" ]; then
+		return 0
+	fi
+
+	echo "Error: the new container's image is '${vca_have:-unknown}' but '$vca_want' was requested" >&2
+	return 1
+}
+
 # migrate_legacy_container
 # One-time retirement of the old "hindsight-cc" container name. This runs
 # BEFORE the health probe on purpose: the legacy container may be the very
@@ -453,17 +476,19 @@ server_healthy() {
 	curl -s --connect-timeout 2 --max-time 3 "$HEALTH_URL" >/dev/null 2>&1
 }
 
-# wait_for_ready
-# Polls health until the server answers or a ~24s wall-clock deadline passes;
-# warns and returns 1 if it never comes up. The deadline (not an attempt count)
-# is what caps the wait below the 30s SessionStart hook timeout, so the hook
-# returns its own warning rather than being killed at the boundary. --max-time
-# bounds each probe's connect+read, so a server that binds the port but stalls
-# on /health (the slow embedded-Postgres migration case) can't drag a single
-# attempt past the budget.
+# wait_for_ready [SECONDS]
+# Polls health until the server answers or a wall-clock deadline passes (default
+# ~24s); warns and returns 1 if it never comes up. The deadline (not an attempt
+# count) is what caps the wait below the 30s SessionStart hook timeout, so the
+# hook returns its own warning rather than being killed at the boundary. Callers
+# outside the hook (recreate) pass a longer deadline. --max-time bounds each
+# probe's connect+read, so a server that binds the port but stalls on /health
+# (the slow embedded-Postgres migration case) can't drag a single attempt past
+# the budget.
 wait_for_ready() {
-	debug "Waiting for server to be ready (up to ~24 seconds)"
-	wfr_deadline=$(($(date +%s) + 24))
+	wfr_seconds="${1:-24}"
+	debug "Waiting for server to be ready (up to ~${wfr_seconds} seconds)"
+	wfr_deadline=$(($(date +%s) + wfr_seconds))
 	while [ "$(date +%s)" -lt "$wfr_deadline" ]; do
 		if curl -s --connect-timeout 1 --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
 			debug "Server ready"
@@ -472,8 +497,8 @@ wait_for_ready() {
 		sleep 1
 	done
 
-	debug "Server did not become ready within the ~24s deadline"
-	echo "Warning: Hindsight server did not start within ~24 seconds" >&2
+	debug "Server did not become ready within the ~${wfr_seconds}s deadline"
+	echo "Warning: Hindsight server did not start within ~${wfr_seconds} seconds" >&2
 	return 1
 }
 
@@ -524,17 +549,92 @@ create_or_recreate() {
 	fi
 }
 
+# recreate_container
+# Explicit, operator-run replacement of the shared container (never called from
+# a hook). Stops it cleanly, keeps it as "<name>-prev" for rollback, builds a
+# new one from the current settings (platform, memory, key, ...), and verifies
+# health and architecture. On any failure it rolls back: the new container is
+# removed, the Postgres binaries are put back, and the old container is renamed
+# back and started. Two containers must never run on the same data directory, so
+# the rollback copy is set not to restart on its own.
+recreate_container() {
+	rc_prev="${CONTAINER_NAME}-prev"
+
+	if ! docker_ready; then
+		echo "Error: Docker is not available" >&2
+		return 1
+	fi
+
+	resolve_config
+	if ! require_api_key; then
+		return 1
+	fi
+	resolve_platform
+
+	rc_id=$(docker ps -aq -f "name=^${CONTAINER_NAME}$" 2>/dev/null)
+	if [ -z "$rc_id" ]; then
+		echo "Error: no '$CONTAINER_NAME' container to recreate (run without arguments to create one)" >&2
+		return 1
+	fi
+	if [ -n "$(docker ps -aq -f "name=^${rc_prev}$" 2>/dev/null)" ]; then
+		echo "Error: '$rc_prev' already exists; remove it first (it is the rollback copy from an earlier recreate)" >&2
+		return 1
+	fi
+
+	echo "Stopping '$CONTAINER_NAME' (up to 60s for a clean Postgres shutdown)..."
+	if ! docker stop -t 60 "$CONTAINER_NAME" >/dev/null 2>&1; then
+		echo "Error: could not stop '$CONTAINER_NAME'" >&2
+		return 1
+	fi
+	if ! docker rename "$CONTAINER_NAME" "$rc_prev"; then
+		echo "Error: could not rename '$CONTAINER_NAME' to '$rc_prev'" >&2
+		docker start "$CONTAINER_NAME" >/dev/null 2>&1
+		return 1
+	fi
+	docker update --restart=no "$rc_prev" >/dev/null 2>&1
+
+	if create_container &&
+		wait_for_ready "${HINDSIGHT_RECREATE_WAIT_SECONDS:-180}" &&
+		verify_container_arch; then
+		echo "Recreated '$CONTAINER_NAME' (${EFF_PLATFORM:-docker default platform}). The previous container is kept, stopped, as '$rc_prev' for rollback."
+		return 0
+	fi
+
+	echo "Recreate failed; rolling back to the previous container..." >&2
+	docker stop -t 60 "$CONTAINER_NAME" >/dev/null 2>&1
+	docker rm "$CONTAINER_NAME" >/dev/null 2>&1
+	undo_guard
+	docker rename "$rc_prev" "$CONTAINER_NAME" >/dev/null 2>&1
+	docker update --restart=unless-stopped "$CONTAINER_NAME" >/dev/null 2>&1
+	docker start "$CONTAINER_NAME" >/dev/null 2>&1
+	return 1
+}
+
+# docker_ready
+# Returns 0 when the docker CLI exists and the daemon answers.
+docker_ready() {
+	command -v docker >/dev/null 2>&1 || return 1
+	docker info >/dev/null 2>&1
+}
+
 main() {
+	case "${1:-}" in
+	'') ;;
+	recreate)
+		recreate_container
+		exit $?
+		;;
+	*)
+		echo "Usage: ensure-hindsight.sh [recreate]" >&2
+		exit 2
+		;;
+	esac
+
 	debug "Starting"
 
 	# Check Docker is available; soft-exit so SessionStart is never blocked.
-	if ! command -v docker >/dev/null 2>&1; then
-		debug "Docker not found in PATH"
-		exit 0
-	fi
-
-	if ! docker info >/dev/null 2>&1; then
-		debug "Docker daemon not running or not accessible"
+	if ! docker_ready; then
+		debug "Docker not found in PATH, or the daemon is not running/accessible"
 		exit 0
 	fi
 
