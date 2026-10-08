@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 
 from bank_utils import get_bank_id, get_project_dir
+from container_info import describe_container
 
 
 BASE_URL = os.environ.get("HINDSIGHT_BASE_URL", "http://localhost:8888").rstrip("/")
@@ -48,6 +49,8 @@ def main():
     print(f"Project directory: {project_dir}")
     print(f"Memory bank ID: {bank_id}")
     print(f"Hindsight server: {health_display}")
+    for line in describe_container():
+        print(line)
     print(f"Memory browser: {UI_URL_TEMPLATE.format(bank_id=bank_id)}")
 
     if blocked:

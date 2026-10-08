@@ -50,6 +50,8 @@ This ensures working on the same repository from different paths shares the same
 - **API endpoint**: http://localhost:8888
 - **UI**: http://localhost:9999
 - **Data storage**: `~/hindsight-data/`
+- **Container flags**: `ensure-hindsight.sh` always passes `--platform` (from the Docker daemon's architecture, overridable with `HINDSIGHT_PLATFORM`), `--restart unless-stopped`, `--stop-timeout 40`, `--shm-size=2g`, a 4g memory limit (`HINDSIGHT_MEMORY_LIMIT`), a health check, log rotation, and a stable worker ID. The LLM key is passed by name from the environment, never in argv.
+- **Recreating**: `ensure-hindsight.sh recreate` (operator-run, never from hooks) stops the container, keeps it as `hindsight-prev`, creates and verifies a new one, and rolls back on failure. The embedded Postgres binaries in the data directory are architecture-specific; a mismatching `installation/` is parked as `installation.<arch>`, never deleted.
 - **Client**: Stdlib-only REST client `scripts/hindsight_api.py` (urllib/json) — no `hindsight-client` dependency
 
 ### Memory Injection Format
@@ -68,7 +70,7 @@ All scripts follow a pattern of silently failing if Hindsight is unavailable. Se
 
 - `scripts/hindsight_api.py` - Stdlib-only REST client (urllib/json) wrapping the Hindsight endpoints; all functions soft-fail so a prompt is never interrupted by a memory error
 - `scripts/bank_utils.py` - Shared utilities for bank ID generation (git-based with path fallback) and `extract_prompt` (normalizes the hook stdin payload)
-- `scripts/ensure-hindsight.sh` - Health-probe-first check that reuses or starts the Hindsight Docker container; reads `config.env` at container-create time
+- `scripts/ensure-hindsight.sh` - Health-probe-first check that reuses or starts the Hindsight Docker container; reads `config.env` at container-create time; `recreate` subcommand replaces the container with rollback
 - `scripts/hs-python.sh` - POSIX-sh interpreter shim that the Python hooks are launched through; probes candidate interpreters (preferring fast, direct system paths), execs the first that imports the stdlib the hooks need, and soft-fails to a silent no-op if none work
 - `scripts/retain-prompt.py` - Stores user prompts via `hindsight_api.retain_detached()`
 - `scripts/inject-memories.py` - Queries and injects relevant memories via `hindsight_api.recall()`
@@ -76,6 +78,7 @@ All scripts follow a pattern of silently failing if Hindsight is unavailable. Se
 - `scripts/reflect.py` - Backs the `/hindsight-cc:reflect` command (AI-assisted decision support)
 - `scripts/search-memories.py` - Manual search utility for testing
 - `scripts/get-status.py` - Status checking utility
+- `scripts/container_info.py` - Stdlib-only, read-only Docker facts (state, health, image architecture, memory) used by `get-status.py`
 
 The Python hook scripts are launched via `sh ${CLAUDE_PLUGIN_ROOT}/scripts/hs-python.sh ${CLAUDE_PLUGIN_ROOT}/scripts/<script>.py` (the interpreter shim above); CLI/command scripts are still run by the system `python3` directly. No virtualenv is used at runtime.
 

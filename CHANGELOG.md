@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-10-08
+
+### Added
+
+- `HINDSIGHT_PLATFORM` (`linux/arm64` or `linux/amd64`) and
+  `HINDSIGHT_MEMORY_LIMIT` settings, read from the environment or `config.env`.
+  `HINDSIGHT_DATA_DIR` overrides the host directory for the Postgres data
+  (default `~/hindsight-data`).
+- `HINDSIGHT_RECREATE_WAIT_SECONDS` (default 180, recreate only): how long
+  `recreate` waits for the new server to answer before rolling back.
+- `ensure-hindsight.sh recreate`: replaces the container with one built from the
+  current settings, keeps the old one as `hindsight-prev`, verifies health and
+  architecture, and rolls back automatically on failure.
+- `/hindsight-cc:memory-status` now reports the container's state, image
+  architecture, health, restart count and memory, and flags emulation.
+
+### Changed
+
+- The container is always created with an explicit `--platform` taken from the
+  Docker daemon's architecture. Previously Docker silently reused whichever
+  architecture a local image tag pointed at, so an amd64 tag on an arm64 host ran
+  under emulation with only a discarded warning.
+- The container now also gets `--restart unless-stopped`, `--stop-timeout 40`
+  (the image needs up to 30 s to flush Postgres on shutdown), a health check,
+  log rotation, a 4g memory limit, and a stable `HINDSIGHT_API_WORKER_ID`.
+- The LLM API key is passed to Docker by name from the environment instead of on
+  the command line, so it no longer appears in `ps` output.
+- Embedded Postgres binaries of the wrong architecture in the data directory are
+  moved aside as `installation.<arch>` (never deleted) when a container is created.
+- A container that exited with code 132, 126 or 127, or is being restarted by
+  Docker after a crash (possibly a loop), is reported with a suggested fix instead of being started
+  again every session.
+
 ## [2.0.0] - 2026-06-04
 
 Breaking infrastructure rewrite. The Docker container is renamed (causing a

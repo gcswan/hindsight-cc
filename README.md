@@ -183,6 +183,13 @@ variable or via `~/.config/hindsight-cc/config.env` (written by
 | `HINDSIGHT_API_LLM_BASE_URL`| LLM base URL (local providers / custom endpoints) | (unset)                            |
 | `HINDSIGHT_DEBUG`           | Enable debug logging (`1`, `true`, or `yes`) | (disabled)                              |
 | `HINDSIGHT_IMAGE`           | Docker image for Hindsight server            | `ghcr.io/vectorize-io/hindsight:0.8.6` |
+| `HINDSIGHT_PLATFORM`        | Docker platform for the container: `linux/arm64` or `linux/amd64` | the Docker daemon's architecture |
+| `HINDSIGHT_MEMORY_LIMIT`    | Container memory limit (`4g`, `4096m`, ...) or `none` | `4g`                                    |
+| `HINDSIGHT_DATA_DIR`        | Host directory for the embedded Postgres data | `~/hindsight-data`                      |
+| `HINDSIGHT_RECREATE_WAIT_SECONDS` | Seconds `recreate` waits for the new server to answer (recreate only) | `180`             |
+
+The platform, memory limit and data directory settings are read when the
+container is created or recreated.
 
 ### Data Storage
 
@@ -254,6 +261,53 @@ Restart the server:
 ```bash
 docker restart hindsight
 ```
+
+### Architecture and Emulation
+
+`/hindsight-cc:memory-status` shows the container's image architecture next to
+the Docker daemon's. An `EMULATED:` line means the container runs under
+emulation (for example an amd64 image on an Apple Silicon Mac), which is slower
+and uses more memory. The plugin always passes `--platform` explicitly when it
+creates the container, so this only happens to containers created some other way
+or forced with `HINDSIGHT_PLATFORM`.
+
+To replace the container with one built from the current settings:
+
+```bash
+sh <plugin-dir>/scripts/ensure-hindsight.sh recreate
+```
+
+`<plugin-dir>` is where Claude Code installed the plugin (or a clone of this
+repository); run this from your own terminal.
+
+It needs the LLM API key (or, for a local provider, the base URL) in the
+environment or in `config.env` (pass the key from
+your secret manager for that one command; never write it into a file in this
+repo). It stops the server cleanly, keeps the old container stopped as
+`hindsight-prev`, creates and verifies the new one, and rolls back automatically
+on failure or if it is interrupted (Ctrl-C, TERM, HUP). Remove `hindsight-prev`
+with `docker rm hindsight-prev` once you are satisfied. If it was killed hard
+(for example SIGKILL) and `hindsight-prev` is still there, restore by hand, in
+this order:
+
+1. `docker rm -f hindsight` (only if a new one exists).
+2. Only if the new container's architecture differs from `hindsight-prev`'s
+   (compare `docker image inspect -f '{{.Architecture}}'` of each container's
+   image): move the binaries back: `installation` to `installation.<new arch>`,
+   then `installation.<old arch>` to `installation`. An `installation.<arch>`
+   directory alone does not mean this run swapped anything.
+3. `docker rename hindsight-prev hindsight`
+4. `docker update --restart=unless-stopped hindsight`
+5. `docker start hindsight`
+
+If the container exits with code 132 (illegal instruction) or Docker keeps restarting it
+after crashes, the session start reports it instead of retrying forever; check
+`docker logs hindsight`. If Docker killed it for running out of memory, raise the
+limit: `HINDSIGHT_MEMORY_LIMIT=6g sh <plugin-dir>/scripts/ensure-hindsight.sh recreate`
+(or `none`). On an Apple Silicon (arm64) host, a fallback for exit 132 is the
+amd64 image under emulation, which uses more memory:
+`HINDSIGHT_PLATFORM=linux/amd64 sh <plugin-dir>/scripts/ensure-hindsight.sh recreate`.
+Please report the Docker Desktop version and `docker logs hindsight` output.
 
 ## Testing
 

@@ -15,7 +15,19 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/get-status.py
 
 ## How To Handle Output
 
-The output will show project directory, memory bank ID, and server health status. Display this information to the user in a clear format.
+The output shows the project directory, memory bank ID, server health, and the
+Docker container's state, image architecture, health, restart count and memory.
+Display this in a clear format.
+
+If a line starts with `EMULATED:`, the container image does not match the Docker
+daemon's architecture (it runs under emulation: slower and heavier on memory).
+Tell the user, and explain the fix: run
+`${CLAUDE_PLUGIN_ROOT}/scripts/ensure-hindsight.sh recreate`. It needs the LLM
+API key (or, for a local provider, the base URL) in the environment or in
+`~/.config/hindsight-cc/config.env`, keeps the
+old container as `hindsight-prev` for rollback, and rolls back automatically if
+the new container does not come up healthy. Do not run it without the user's
+go-ahead, because it briefly stops the memory server.
 
 ## Finally
 

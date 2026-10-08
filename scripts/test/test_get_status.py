@@ -7,10 +7,13 @@ via importlib from its file path.
 
 import errno
 import importlib.util
+import sys
 import urllib.error
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).parent.parent
+# get-status.py imports its sibling modules by name, as it does when run directly.
+sys.path.insert(0, str(SCRIPTS_DIR))
 
 
 def _load_get_status():
@@ -52,3 +55,20 @@ class TestIsBlockedProbeError:
 
     def test_urlerror_normal_down_is_not_blocked(self):
         assert is_blocked(urllib.error.URLError("normal down")) is False
+
+
+class TestMainOutput:
+    def test_main_prints_the_container_lines_after_the_server_line(self, monkeypatch, capsys):
+        monkeypatch.setattr(get_status, "get_health_status", lambda: ("Reachable (HTTP 200)", False))
+        monkeypatch.setattr(
+            get_status,
+            "describe_container",
+            lambda: ["Container: hindsight (running, healthy), restarts: 0", "EMULATED: example"],
+        )
+
+        get_status.main()
+
+        lines = capsys.readouterr().out.splitlines()
+        server = lines.index("Hindsight server: Reachable (HTTP 200)")
+        assert lines[server + 1] == "Container: hindsight (running, healthy), restarts: 0"
+        assert lines[server + 2] == "EMULATED: example"

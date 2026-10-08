@@ -12,6 +12,13 @@
 TEST_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 SCRIPT="$TEST_DIR/../ensure-hindsight.sh"
 
+# Never let a test touch a real data directory: point the script at a throwaway
+# one for the whole run (the script reads HINDSIGHT_DATA_DIR).
+TEST_DATA_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/eh_data.XXXXXX")
+HINDSIGHT_DATA_DIR="$TEST_DATA_ROOT/hindsight-data"
+export HINDSIGHT_DATA_DIR
+trap 'rm -rf "$TEST_DATA_ROOT"' EXIT
+
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -126,18 +133,52 @@ config_parser_tests() {
 #   FAKE_HINDSIGHT_EXISTS     docker ps reports new container when "1"
 #   FAKE_LOG                  file to which docker logs its argv
 #   FAKE_MARKER               file created by `docker run` (started marker)
+#   FAKE_DAEMON_ARCH          what `docker info` reports as the architecture
+#   FAKE_IMAGE_ARCH           what `docker image inspect` reports (default arm64)
+#   FAKE_STATE                `State.Status ExitCode Restarting` (default "exited 0 false")
+#   FAKE_OOM                  `State.OOMKilled` appended to FAKE_STATE (default "false")
+#   FAKE_CURL_SIGNAL          curl sends this signal (e.g. TERM) to its parent, then fails
+#   FAKE_UPDATE_SIGNAL        `docker update --restart=unless-stopped` (the rollback) sends this signal to its parent
+#   FAKE_PREV_EXISTS        docker ps reports the rollback container when "1"
+#   FAKE_RUN_KEY_FILE         file that receives the API key docker run inherited
+#   FAKE_STOP_FAIL            `docker stop` fails when "1"
+#   FAKE_RENAME_FAIL          `docker rename` fails when "1"
+#   FAKE_RUN_FAIL             `docker run` fails (creates nothing) when "1"
+#   FAKE_RUN_MKDIR            directory `docker run` creates (to occupy a slot)
+#   FAKE_RM_FAIL              `docker rm` (with or without -f) fails when "1"
+#   FAKE_DISABLE_RESTART_FAIL `docker update --restart=no ...` fails when "1"
+#   FAKE_START_FAIL           `docker start` fails when "1"
+#   FAKE_RENAME_BACK_FAIL     `docker rename hindsight-prev hindsight` fails when "1"
+#   FAKE_STOP_SIGNAL          the SECOND `docker stop` (the rollback's) sends this signal to its parent
+#   FAKE_LOGS_OUT             text `docker logs` prints
+#   FAKE_PS_FAIL_AFTER_RM     `docker ps` fails once any `docker rm` has run when "1"
+# `docker run` also writes each argument as [arg] on one line to "$FAKE_LOG.args",
+# so a test can tell whether a value arrived as ONE argument (word-splitting).
+# The fake also tracks whether a container NAMED "hindsight" exists (only when
+# FAKE_HINDSIGHT_EXISTS=1): renaming it away or removing it by name makes it
+# absent, and `docker run` / renaming something back to it makes it present.
+# Removing an absent "hindsight" by name fails, like the real "No such container".
+# `docker start` also logs `fake-start-sees-installation <ELF e_machine hex>` for
+# HINDSIGHT_DATA_DIR/installation, so tests can see which binaries were in place.
 build_shims() {
 	dir="$1"
 
 	cat >"$dir/docker" <<'EOF'
 #!/bin/sh
 echo "$@" >>"$FAKE_LOG"
+if [ "$1" = run ]; then
+	{ printf '[%s]' "$@"; echo; } >>"$FAKE_LOG.args"
+fi
+fake_absent="$FAKE_LOG.hindsight-absent"
 cmd="$1"
 case "$cmd" in
 info)
+	# `docker info --format '{{.Architecture}}'`: FAKE_DAEMON_ARCH, else silent.
+	[ -n "${FAKE_DAEMON_ARCH:-}" ] && echo "$FAKE_DAEMON_ARCH"
 	exit 0
 	;;
 ps)
+	[ "${FAKE_PS_FAIL_AFTER_RM:-0}" = "1" ] && [ -f "$FAKE_LOG.rm-done" ] && exit 1
 	# Determine which name filter was requested and echo a fake id if "exists".
 	for a in "$@"; do
 		case "$a" in
@@ -145,30 +186,103 @@ ps)
 			[ "${FAKE_HINDSIGHT_CC_EXISTS:-0}" = "1" ] && echo "ccid123"
 			;;
 		name=^hindsight$)
-			[ "${FAKE_HINDSIGHT_EXISTS:-0}" = "1" ] && echo "hsid456"
+			[ "${FAKE_HINDSIGHT_EXISTS:-0}" = "1" ] && [ ! -f "$fake_absent" ] && echo "hsid456"
+			;;
+		name=^hindsight-prev$)
+			[ "${FAKE_PREV_EXISTS:-0}" = "1" ] && echo "previd789"
 			;;
 		esac
 	done
 	exit 0
 	;;
 run)
-	# Simulate a started server.
+	if [ "${FAKE_RUN_FAIL:-0}" = "1" ]; then
+		echo "fake-run-error: port is already allocated"
+		exit 1
+	fi
+	rm -f "$fake_absent"
+	[ -n "${FAKE_RUN_MKDIR:-}" ] && mkdir -p "$FAKE_RUN_MKDIR"
+	# Record the API key docker would inherit from the caller's environment,
+	# then simulate a started server.
+	[ -n "${FAKE_RUN_KEY_FILE:-}" ] && printf '%s' "${HINDSIGHT_API_LLM_API_KEY:-}" >"$FAKE_RUN_KEY_FILE"
 	[ -n "${FAKE_MARKER:-}" ] && : >"$FAKE_MARKER"
 	exit 0
 	;;
 start)
+	[ "${FAKE_START_FAIL:-0}" = "1" ] && exit 1
+	# Log which Postgres binaries are in place at start time.
+	for fs_bin in "${HINDSIGHT_DATA_DIR:-/nonexistent}"/installation/*/bin/postgres; do
+		if [ -f "$fs_bin" ]; then
+			echo "fake-start-sees-installation $(od -An -tx1 -j18 -N2 "$fs_bin" | tr -d ' \n')" >>"$FAKE_LOG"
+		fi
+		break
+	done
 	# Starting an existing container also brings the server up.
 	[ -n "${FAKE_MARKER:-}" ] && : >"$FAKE_MARKER"
 	exit 0
 	;;
-inspect)
-	# Emit an EMPTY API key (the recreate path) when FAKE_MISSING_KEY=1,
-	# otherwise a present key (the docker-start path).
-	if [ "${FAKE_MISSING_KEY:-0}" = "1" ]; then
-		echo "HINDSIGHT_API_LLM_API_KEY="
-	else
-		echo "HINDSIGHT_API_LLM_API_KEY=present"
+rm)
+	: >"$FAKE_LOG.rm-done"
+	[ "${FAKE_RM_FAIL:-0}" = "1" ] && exit 1
+	for rm_arg in "$@"; do rm_name="$rm_arg"; done
+	if [ "$rm_name" = hindsight ] || [ "$rm_name" = hsid456 ]; then
+		[ -f "$fake_absent" ] && exit 1
+		: >"$fake_absent"
 	fi
+	exit 0
+	;;
+update)
+	case "$*" in
+	*"--restart=no"*) [ "${FAKE_DISABLE_RESTART_FAIL:-0}" = "1" ] && exit 1 ;;
+	*"--restart=unless-stopped"*) [ -n "${FAKE_UPDATE_SIGNAL:-}" ] && kill -"$FAKE_UPDATE_SIGNAL" "$PPID" ;;
+	esac
+	exit 0
+	;;
+image)
+	# `docker image inspect -f '{{.Architecture}}' <id>`
+	echo "${FAKE_IMAGE_ARCH:-arm64}"
+	exit 0
+	;;
+inspect)
+	case "$*" in
+	*"{{.Image}}"*)
+		echo "sha256:fakeimage"
+		;;
+	*"{{.State.Status}}"*)
+		echo "${FAKE_STATE:-exited 0 false} ${FAKE_OOM:-false}"
+		;;
+	*)
+		# Emit an EMPTY API key (the recreate path) when FAKE_MISSING_KEY=1,
+		# otherwise a present key (the docker-start path).
+		if [ "${FAKE_MISSING_KEY:-0}" = "1" ]; then
+			echo "HINDSIGHT_API_LLM_API_KEY="
+		else
+			echo "HINDSIGHT_API_LLM_API_KEY=present"
+		fi
+		;;
+	esac
+	exit 0
+	;;
+stop)
+	[ "${FAKE_STOP_FAIL:-0}" = "1" ] && exit 1
+	if [ -n "${FAKE_STOP_SIGNAL:-}" ]; then
+		if [ -f "$FAKE_LOG.stopped-once" ]; then
+			kill -"$FAKE_STOP_SIGNAL" "$PPID"
+		else
+			: >"$FAKE_LOG.stopped-once"
+		fi
+	fi
+	exit 0
+	;;
+logs)
+	[ -n "${FAKE_LOGS_OUT:-}" ] && echo "$FAKE_LOGS_OUT"
+	exit 0
+	;;
+rename)
+	[ "${FAKE_RENAME_FAIL:-0}" = "1" ] && exit 1
+	[ "${FAKE_RENAME_BACK_FAIL:-0}" = "1" ] && [ "$3" = hindsight ] && exit 1
+	[ "$2" = hindsight ] && : >"$fake_absent"
+	[ "$3" = hindsight ] && rm -f "$fake_absent"
 	exit 0
 	;;
 *)
@@ -181,7 +295,12 @@ EOF
 	cat >"$dir/curl" <<'EOF'
 #!/bin/sh
 # Health passes once the server has been "started" (marker exists), else honor
-# FAKE_HEALTH_OK.
+# FAKE_HEALTH_OK. FAKE_CURL_SIGNAL=TERM makes it signal its parent (the script's
+# shell, since curl is called directly from wait_for_ready) and then fail.
+if [ -n "${FAKE_CURL_SIGNAL:-}" ]; then
+	kill -"$FAKE_CURL_SIGNAL" "$PPID"
+	exit 1
+fi
 if [ -n "${FAKE_MARKER:-}" ] && [ -f "$FAKE_MARKER" ]; then
 	exit 0
 fi
@@ -459,9 +578,1458 @@ flow_test_no_docker() {
 }
 
 # ---------------------------------------------------------------------------
+# Container platform, resources, and recreate (see
+# docs/superpowers/specs/2026-10-08-hindsight-container-platform-design.md)
+# ---------------------------------------------------------------------------
+
+# platform_for DAEMON_ARCH [OVERRIDE]
+# Prints what resolve_platform picks for a fake Docker daemon architecture and an
+# optional HINDSIGHT_PLATFORM. Uses the global $tmp as the shim directory.
+platform_for() {
+	pf_arch="$1"
+	pf_override="${2:-}"
+	(
+		unset HINDSIGHT_PLATFORM
+		if [ -n "$pf_override" ]; then
+			HINDSIGHT_PLATFORM="$pf_override"
+			export HINDSIGHT_PLATFORM
+		fi
+		PATH="$tmp:$PATH"
+		FAKE_LOG="$tmp/docker.log"
+		FAKE_DAEMON_ARCH="$pf_arch"
+		export PATH FAKE_LOG FAKE_DAEMON_ARCH
+		resolve_platform
+		printf '%s' "$EFF_PLATFORM"
+	)
+}
+
+# limit_for [ENV_VALUE]
+# Prints what resolve_memory_limit picks for an optional HINDSIGHT_MEMORY_LIMIT.
+limit_for() {
+	lf_env="${1:-}"
+	(
+		unset HINDSIGHT_MEMORY_LIMIT
+		if [ -n "$lf_env" ]; then
+			HINDSIGHT_MEMORY_LIMIT="$lf_env"
+			export HINDSIGHT_MEMORY_LIMIT
+		fi
+		resolve_memory_limit
+		printf '%s' "$EFF_MEMORY_LIMIT"
+	)
+}
+
+resolution_tests() {
+	# shellcheck disable=SC1090
+	ENSURE_HINDSIGHT_LIB=1 . "$SCRIPT"
+
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_res.XXXXXX")
+	build_shims "$tmp"
+	: >"$tmp/docker.log"
+	CONFIG_FILE="$tmp/none.env"
+
+	assert_eq "platform: aarch64 daemon -> linux/arm64" "linux/arm64" "$(platform_for aarch64)"
+	assert_eq "platform: arm64 daemon -> linux/arm64" "linux/arm64" "$(platform_for arm64)"
+	assert_eq "platform: x86_64 daemon -> linux/amd64" "linux/amd64" "$(platform_for x86_64)"
+	assert_eq "platform: amd64 daemon -> linux/amd64" "linux/amd64" "$(platform_for amd64)"
+	assert_eq "platform: unknown daemon arch -> empty (no --platform)" "" "$(platform_for s390x)"
+	assert_eq "platform: env override beats daemon arch" "linux/amd64" "$(platform_for aarch64 linux/amd64)"
+	assert_eq "platform: invalid override is ignored" "linux/arm64" "$(platform_for aarch64 linux/s390x)"
+
+	printf 'HINDSIGHT_PLATFORM=linux/amd64\nHINDSIGHT_MEMORY_LIMIT=3g\n' >"$tmp/cfg.env"
+	CONFIG_FILE="$tmp/cfg.env"
+	assert_eq "config: HINDSIGHT_PLATFORM is a recognized key" "linux/amd64" "$(config_get HINDSIGHT_PLATFORM)"
+	assert_eq "platform: config.env override beats daemon arch" "linux/amd64" "$(platform_for aarch64)"
+	assert_eq "platform: env override beats config.env" "linux/arm64" "$(platform_for aarch64 linux/arm64)"
+	assert_eq "platform: an invalid env value does not hide a valid config.env value" "linux/amd64" "$(platform_for aarch64 linux/s390x)"
+	assert_eq "memory: config.env value used when env is unset" "3g" "$(limit_for)"
+	assert_eq "memory: env beats config.env" "6g" "$(limit_for 6g)"
+
+	printf 'HINDSIGHT_PLATFORM="linux/arm64"\nHINDSIGHT_MEMORY_LIMIT='"'"'2G'"'"'\n' >"$tmp/quoted.env"
+	CONFIG_FILE="$tmp/quoted.env"
+	assert_eq "platform: a quoted config.env value is accepted" "linux/arm64" "$(platform_for x86_64)"
+	assert_eq "memory: a quoted, uppercase-unit config.env value is accepted" "2G" "$(limit_for)"
+
+	CONFIG_FILE="$tmp/none.env"
+	assert_eq "memory: default is 4g" "4g" "$(limit_for)"
+	assert_eq "memory: 'none' disables the limit" "none" "$(limit_for none)"
+	assert_eq "memory: megabytes accepted" "4096m" "$(limit_for 4096m)"
+	assert_eq "memory: garbage falls back to the default" "4g" "$(limit_for garbage)"
+	assert_eq "memory: bad suffix falls back to the default" "4g" "$(limit_for 4x)"
+	assert_eq "memory: leading letter falls back to the default" "4g" "$(limit_for g4)"
+
+	rm -rf "$tmp"
+}
+
+flow_test_create_flags() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_h.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	keyfile="$tmp/run-key"
+	printf 'HINDSIGHT_API_LLM_API_KEY=s3cret-from-config\n' >"$tmp/config.env"
+
+	# No container exists and the server is down, so the create path runs. The
+	# API key comes ONLY from config.env, never from the caller's environment.
+	out=$(
+		unset HINDSIGHT_API_LLM_API_KEY HINDSIGHT_MEMORY_LIMIT HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_RUN_KEY_FILE="$keyfile" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			HINDSIGHT_CONFIG_FILE="$tmp/config.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(h): create exits 0" "0" "$rc"
+	for flag in \
+		"--platform linux/arm64" \
+		"--restart unless-stopped" \
+		"--stop-timeout 40" \
+		"--shm-size=2g" \
+		"--memory 4g" \
+		"--memory-swap 4g" \
+		"--health-cmd curl -sf http://localhost:8888/health" \
+		"--health-interval 30s" \
+		"--health-start-period 120s" \
+		"--log-opt max-size=10m" \
+		"--log-opt max-file=3" \
+		"-e HINDSIGHT_API_WORKER_ID=hindsight-local"; do
+		if log_has "$flag" "$log"; then
+			pass "flow(h): docker run has '$flag'"
+		else
+			fail "flow(h): docker run is missing '$flag'"
+		fi
+	done
+	if log_has "s3cret-from-config" "$log"; then
+		fail "flow(h): the API key value must NOT appear in docker's argv"
+	else
+		pass "flow(h): the API key value is absent from docker's argv"
+	fi
+	if log_has "HINDSIGHT_API_LLM_API_KEY=" "$log"; then
+		fail "flow(h): the API key must be passed by name, not NAME=value"
+	else
+		pass "flow(h): the API key is passed by name only"
+	fi
+	if log_has "-e HINDSIGHT_API_LLM_API_KEY " "$log"; then
+		pass "flow(h): bare -e HINDSIGHT_API_LLM_API_KEY is present"
+	else
+		fail "flow(h): expected a bare '-e HINDSIGHT_API_LLM_API_KEY'"
+	fi
+	assert_eq "flow(h): docker inherits the key from the environment" \
+		"s3cret-from-config" "$(cat "$keyfile" 2>/dev/null)"
+
+	rm -rf "$tmp"
+}
+
+flow_test_memory_limit_override() {
+	for lim in 6g none; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_i.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+
+		out=$(
+			unset HINDSIGHT_PLATFORM
+			PATH="$tmp:$PATH" \
+				FAKE_LOG="$log" \
+				FAKE_MARKER="$tmp/started.marker" \
+				FAKE_HEALTH_OK=0 \
+				FAKE_HINDSIGHT_CC_EXISTS=0 \
+				FAKE_HINDSIGHT_EXISTS=0 \
+				HINDSIGHT_API_LLM_API_KEY="test-key" \
+				HINDSIGHT_MEMORY_LIMIT="$lim" \
+				HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+				sh "$SCRIPT"
+			echo "exit=$?"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+		assert_eq "flow(i): HINDSIGHT_MEMORY_LIMIT=$lim creates the container" "0" "$rc"
+		if [ "$lim" = "none" ]; then
+			if log_has "--memory " "$log" || log_has "--memory-swap" "$log"; then
+				fail "flow(i): 'none' must pass no memory flags"
+			else
+				pass "flow(i): 'none' passes no memory flags"
+			fi
+		elif log_has "--memory $lim" "$log" && log_has "--memory-swap $lim" "$log"; then
+			pass "flow(i): $lim is passed as --memory and --memory-swap"
+		else
+			fail "flow(i): expected --memory $lim and --memory-swap $lim"
+		fi
+
+		rm -rf "$tmp"
+	done
+}
+
+flow_test_unknown_arch_omits_platform() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_j.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+
+	# `docker info` reports no architecture: keep today's behavior (no flag).
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			HINDSIGHT_API_LLM_API_KEY="test-key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(j): unknown architecture still creates the container" "0" "$rc"
+	if log_has "--platform" "$log"; then
+		fail "flow(j): no --platform when the architecture is unknown"
+	else
+		pass "flow(j): no --platform when the architecture is unknown"
+	fi
+
+	rm -rf "$tmp"
+}
+
+flow_test_key_with_shell_metacharacters() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_n.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	keyfile="$tmp/run-key"
+
+	# Real keys can contain characters the shell treats specially. The value must
+	# reach docker intact (through the environment) and must never be in argv.
+	key='ab c"d$HOME;e&f|g`h'
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_RUN_KEY_FILE="$keyfile" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			HINDSIGHT_API_LLM_API_KEY="$key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(n): a key with shell metacharacters creates the container" "0" "$rc"
+	assert_eq "flow(n): the key arrives intact through the environment" "$key" "$(cat "$keyfile" 2>/dev/null)"
+	if log_has 'ab c' "$log"; then
+		fail "flow(n): the key must not appear in docker's argv"
+	else
+		pass "flow(n): the key is absent from docker's argv"
+	fi
+
+	rm -rf "$tmp"
+}
+
+# mkelf FILE ARCH
+# Writes a 20-byte ELF header whose e_machine says ARCH (amd64|arm64); any other
+# ARCH writes a non-ELF file. Enough for elf_arch to classify.
+mkelf() {
+	mkdir -p "$(dirname "$1")"
+	case "$2" in
+	amd64) printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\003\000\076\000' >"$1" ;;
+	arm64) printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\003\000\267\000' >"$1" ;;
+	*) printf 'not an elf file' >"$1" ;;
+	esac
+}
+
+# guard_fresh: reset DATA_DIR and the recorded swap between guard scenarios.
+guard_fresh() {
+	rm -rf "$DATA_DIR"
+	mkdir -p "$DATA_DIR"
+	GUARD_SWAPPED=0
+	GUARD_HAVE=""
+	GUARD_WANT=""
+}
+
+# present PATH -> "present" or "absent"
+present() {
+	if [ -e "$1" ]; then echo present; else echo absent; fi
+}
+
+guard_tests() {
+	# shellcheck disable=SC1090
+	ENSURE_HINDSIGHT_LIB=1 . "$SCRIPT"
+
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_guard.XXXXXX")
+	# A space in the path must not break any of the moves.
+	DATA_DIR="$tmp/data dir"
+	pg="18.1.0/bin/postgres"
+
+	mkelf "$tmp/x86" amd64
+	mkelf "$tmp/arm" arm64
+	mkelf "$tmp/junk" other
+	assert_eq "elf_arch: x86-64 header" "amd64" "$(elf_arch "$tmp/x86")"
+	assert_eq "elf_arch: aarch64 header" "arm64" "$(elf_arch "$tmp/arm")"
+	assert_eq "elf_arch: non-ELF file" "unknown" "$(elf_arch "$tmp/junk")"
+	assert_eq "elf_arch: missing file" "unknown" "$(elf_arch "$tmp/nope")"
+	assert_eq "platform_arch: linux/arm64" "arm64" "$(platform_arch linux/arm64)"
+	assert_eq "platform_arch: linux/amd64" "amd64" "$(platform_arch linux/amd64)"
+	assert_eq "platform_arch: empty" "" "$(platform_arch "")"
+
+	# 1. Mismatch with no saved copy: park it, leave installation for pg0 to refill.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" amd64
+	guard_installation arm64
+	rc=$?
+	assert_eq "guard(1): mismatch returns 0" "0" "$rc"
+	assert_eq "guard(1): installation is moved aside" "absent" "$(present "$DATA_DIR/installation")"
+	assert_eq "guard(1): the parked copy is the amd64 one" "amd64" "$(elf_arch "$DATA_DIR/installation.amd64/$pg")"
+	assert_eq "guard(1): the swap is recorded" "1" "$GUARD_SWAPPED"
+	# pg0 downloads fresh binaries into installation; undo must keep them.
+	mkelf "$DATA_DIR/installation/$pg" arm64
+	undo_guard
+	rc=$?
+	assert_eq "guard(1): undo returns 0" "0" "$rc"
+	assert_eq "guard(1): undo restores the original amd64 installation" "amd64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+	assert_eq "guard(1): undo saves the downloaded arm64 copy" "arm64" "$(elf_arch "$DATA_DIR/installation.arm64/$pg")"
+	assert_eq "guard(1): undo clears the recorded swap" "0" "$GUARD_SWAPPED"
+
+	# 2. Mismatch with a saved matching copy: swap it in; undo swaps it back.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" amd64
+	mkelf "$DATA_DIR/installation.arm64/$pg" arm64
+	guard_installation arm64
+	rc=$?
+	assert_eq "guard(2): returns 0" "0" "$rc"
+	assert_eq "guard(2): the saved arm64 copy is now installation" "arm64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+	assert_eq "guard(2): the amd64 copy is parked" "amd64" "$(elf_arch "$DATA_DIR/installation.amd64/$pg")"
+	assert_eq "guard(2): the saved copy slot is consumed" "absent" "$(present "$DATA_DIR/installation.arm64")"
+	undo_guard
+	assert_eq "guard(2): undo puts amd64 back" "amd64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+	assert_eq "guard(2): undo puts arm64 back in its slot" "arm64" "$(elf_arch "$DATA_DIR/installation.arm64/$pg")"
+	assert_eq "guard(2): undo leaves no amd64 slot" "absent" "$(present "$DATA_DIR/installation.amd64")"
+
+	# 3. Already the right architecture: nothing moves.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" arm64
+	guard_installation arm64
+	assert_eq "guard(3): matching installation is untouched" "installation" "$(ls "$DATA_DIR")"
+	assert_eq "guard(3): no swap recorded" "0" "$GUARD_SWAPPED"
+
+	# 4. Unidentifiable binary: never touched.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" other
+	guard_installation arm64
+	assert_eq "guard(4): an unidentifiable binary is untouched" "installation" "$(ls "$DATA_DIR")"
+
+	# 5. Nothing installed yet: nothing to do.
+	guard_fresh
+	guard_installation arm64
+	rc=$?
+	assert_eq "guard(5): empty data dir returns 0" "0" "$rc"
+	assert_eq "guard(5): empty data dir stays empty" "" "$(ls "$DATA_DIR")"
+
+	# 6. The parking slot is taken: refuse, change nothing.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" amd64
+	mkelf "$DATA_DIR/installation.amd64/$pg" amd64
+	guard_installation arm64 2>/dev/null
+	rc=$?
+	assert_eq "guard(6): a taken parking slot returns 1" "1" "$rc"
+	assert_eq "guard(6): installation is left in place" "amd64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+	assert_eq "guard(6): no swap recorded" "0" "$GUARD_SWAPPED"
+
+	# 7. No architecture to compare against: nothing to do.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" amd64
+	guard_installation ""
+	assert_eq "guard(7): an empty target architecture is a no-op" "amd64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+
+	rm -rf "$tmp"
+}
+
+flow_test_create_parks_wrong_arch_installation() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_k.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data dir"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+
+	# A new container on an arm64 daemon must not inherit amd64 Postgres binaries.
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			HINDSIGHT_DATA_DIR="$data" \
+			HINDSIGHT_API_LLM_API_KEY="test-key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(k): create exits 0" "0" "$rc"
+	assert_eq "flow(k): the amd64 Postgres binaries were parked" "amd64" \
+		"$(elf_arch "$data/installation.amd64/18.1.0/bin/postgres")"
+	if log_has "-v $data:/home/hindsight/.pg0" "$log"; then
+		pass "flow(k): the data dir is the one bind-mounted"
+	else
+		fail "flow(k): expected the data dir bind mount on docker run"
+	fi
+	# The data dir has a space: it must reach docker as ONE argument, and so must
+	# the health command (the log above cannot tell, it joins arguments).
+	if grep -q -F "[-v][$data:/home/hindsight/.pg0]" "$log.args"; then
+		pass "flow(k): the data dir mount arrives as one argument"
+	else
+		fail "flow(k): the data dir mount was split: $(cat "$log.args" 2>/dev/null)"
+	fi
+	if grep -q -F "[--health-cmd][curl -sf http://localhost:8888/health]" "$log.args"; then
+		pass "flow(k): the health command arrives as one argument"
+	else
+		fail "flow(k): the health command was split: $(cat "$log.args" 2>/dev/null)"
+	fi
+
+	rm -rf "$tmp"
+}
+
+# log_has_mutation LOGFILE
+# True when docker was asked to change anything (as opposed to inspect/list).
+log_has_mutation() {
+	grep -q -E '^(run|rm|start|stop|rename|update) ' "$1" 2>/dev/null
+}
+
+flow_test_exec_failure_is_diagnosed_not_restarted() {
+	for state in "exited 132 false" "exited 126 false" "exited 127 false" "restarting 1 true"; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_l.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+
+		out=$(
+			PATH="$tmp:$PATH" \
+				FAKE_LOG="$log" \
+				FAKE_HEALTH_OK=0 \
+				FAKE_HINDSIGHT_CC_EXISTS=0 \
+				FAKE_HINDSIGHT_EXISTS=1 \
+				FAKE_STATE="$state" \
+				HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+				sh "$SCRIPT" 2>&1
+			echo "exit=$?"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+		assert_eq "flow(l): '$state' exits 1" "1" "$rc"
+		if log_has "start hsid456" "$log"; then
+			fail "flow(l): '$state' must NOT be started again"
+		else
+			pass "flow(l): '$state' is not started again"
+		fi
+		case "$out" in
+		*"not runnable"*"recreate"*) pass "flow(l): '$state' prints a diagnosis naming recreate" ;;
+		*) fail "flow(l): '$state' expected a 'not runnable ... recreate' diagnosis, got: $out" ;;
+		esac
+
+		rm -rf "$tmp"
+	done
+
+	# Any other exit code (a normal stop, a kill) is still just started.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_l2.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	out=$(
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_STATE="exited 137 false" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+	assert_eq "flow(l): exit code 137 still starts the container" "0" "$rc"
+	if log_has "start hsid456" "$log"; then
+		pass "flow(l): exit code 137 is started"
+	else
+		fail "flow(l): expected 'docker start hsid456' for exit code 137"
+	fi
+	rm -rf "$tmp"
+}
+
+# exec_diag STATE OOM DAEMON_ARCH
+# Runs the hook path against an existing container in STATE and prints the
+# combined output plus `exit=N`.
+exec_diag() {
+	ed_tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_m.XXXXXX")
+	build_shims "$ed_tmp"
+	: >"$ed_tmp/docker.log"
+	PATH="$ed_tmp:$PATH" \
+		FAKE_LOG="$ed_tmp/docker.log" \
+		FAKE_HEALTH_OK=0 \
+		FAKE_HINDSIGHT_CC_EXISTS=0 \
+		FAKE_HINDSIGHT_EXISTS=1 \
+		FAKE_STATE="$1" \
+		FAKE_OOM="$2" \
+		FAKE_DAEMON_ARCH="$3" \
+		HINDSIGHT_CONFIG_FILE="$ed_tmp/none.env" \
+		sh "$SCRIPT" 2>&1
+	echo "exit=$?"
+	rm -rf "$ed_tmp"
+}
+
+flow_test_exec_failure_advice_depends_on_cause() {
+	# (1) An OOM-killed restart loop: raise the memory limit, never advise amd64
+	# (that image needs MORE memory).
+	out=$(exec_diag "restarting 137 true" true aarch64)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+	assert_eq "flow(m): OOM restart loop exits 1" "1" "$rc"
+	case "$out" in
+	*"restarting, last exit code 137, out of memory"*) pass "flow(m): OOM restart loop reports the last exit code and OOM" ;;
+	*) fail "flow(m): expected the state to include the exit code and OOM, got: $out" ;;
+	esac
+	case "$out" in
+	*"HINDSIGHT_MEMORY_LIMIT=6g"*"recreate"*) pass "flow(m): OOM restart loop advises raising the memory limit" ;;
+	*) fail "flow(m): expected memory-limit advice, got: $out" ;;
+	esac
+	case "$out" in
+	*"linux/amd64"*) fail "flow(m): OOM must not advise amd64, got: $out" ;;
+	*) pass "flow(m): OOM does not advise amd64 even on an arm64 daemon" ;;
+	esac
+
+	# (2) Exit 132 on an amd64 daemon: no platform advice.
+	out=$(exec_diag "exited 132 false" false x86_64)
+	case "$out" in
+	*"linux/amd64"*) fail "flow(m): exit 132 on an amd64 daemon must not advise amd64, got: $out" ;;
+	*) pass "flow(m): exit 132 on an amd64 daemon gives no amd64 advice" ;;
+	esac
+	case "$out" in
+	*"docker logs hindsight"*) pass "flow(m): exit 132 points at the container logs" ;;
+	*) fail "flow(m): expected a docker logs pointer, got: $out" ;;
+	esac
+
+	# (3) Exit 132 on an arm64 daemon: the emulation fallback is still offered.
+	out=$(exec_diag "exited 132 false" false aarch64)
+	case "$out" in
+	*"HINDSIGHT_PLATFORM=linux/amd64"*"recreate"*) pass "flow(m): exit 132 on an arm64 daemon offers the amd64 fallback" ;;
+	*) fail "flow(m): expected the amd64 fallback on arm64, got: $out" ;;
+	esac
+
+	# (4) A non-OOM restart loop reports its exit code; the script is named by $0.
+	out=$(exec_diag "restarting 1 true" false aarch64)
+	case "$out" in
+	*"restarting, last exit code 1)"*) pass "flow(m): a non-OOM restart loop reports its exit code" ;;
+	*) fail "flow(m): expected 'restarting, last exit code 1', got: $out" ;;
+	esac
+	case "$out" in
+	*"$SCRIPT recreate"*) pass "flow(m): advice names the script by its invoked path" ;;
+	*) fail "flow(m): expected '$SCRIPT recreate' in the advice, got: $out" ;;
+	esac
+}
+
+flow_test_drift_is_reported_only_in_debug() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_m.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+
+	# Server healthy, container image is amd64 on an arm64 daemon.
+	: >"$log"
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_HEALTH_OK=1 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			FAKE_IMAGE_ARCH=amd64 \
+			HINDSIGHT_DEBUG=1 \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT" 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+	assert_eq "flow(m): healthy server with drift exits 0" "0" "$rc"
+	case "$out" in
+	*"Platform drift"*"amd64"*"arm64"*) pass "flow(m): debug output reports the drift" ;;
+	*) fail "flow(m): expected a 'Platform drift' debug line, got: $out" ;;
+	esac
+	if log_has_mutation "$log"; then
+		fail "flow(m): reporting drift must not change any container"
+	else
+		pass "flow(m): reporting drift changes nothing"
+	fi
+
+	# Without debug the healthy path must not even inspect the container.
+	: >"$log"
+	out=$(
+		unset HINDSIGHT_PLATFORM HINDSIGHT_DEBUG
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_HEALTH_OK=1 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			FAKE_IMAGE_ARCH=amd64 \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT" 2>&1
+		echo "exit=$?"
+	)
+	case "$out" in
+	*"Platform drift"*) fail "flow(m): drift must not be reported without HINDSIGHT_DEBUG" ;;
+	*) pass "flow(m): no drift output without HINDSIGHT_DEBUG" ;;
+	esac
+	if log_has "image inspect" "$log"; then
+		fail "flow(m): the healthy path must not inspect images without HINDSIGHT_DEBUG"
+	else
+		pass "flow(m): the healthy path stays inspection-free without HINDSIGHT_DEBUG"
+	fi
+
+	rm -rf "$tmp"
+}
+
+# log_before FIRST SECOND LOGFILE
+# True when FIRST's first match in LOGFILE comes before SECOND's first match.
+log_before() {
+	lb_a=$(grep -n -- "$1" "$3" | head -1 | cut -d: -f1)
+	lb_b=$(grep -n -- "$2" "$3" | head -1 | cut -d: -f1)
+	[ -n "$lb_a" ] && [ -n "$lb_b" ] && [ "$lb_a" -lt "$lb_b" ]
+}
+
+# recreate_run TMP
+# Runs `ensure-hindsight.sh recreate` against the fake shims in TMP, printing the
+# combined output and then an `exit=N` line. Callers export FAKE_* / HINDSIGHT_*
+# in a surrounding subshell.
+recreate_run() {
+	PATH="$1:$PATH" \
+		FAKE_LOG="$1/docker.log" \
+		HINDSIGHT_CONFIG_FILE="$1/none.env" \
+		HINDSIGHT_RECREATE_WAIT_SECONDS=1 \
+		sh "$SCRIPT" recreate 2>&1
+	echo "exit=$?"
+}
+
+# rollback_seq LOGFILE
+# The rollback-relevant docker calls logged from the new container's `run`
+# onwards, joined with `|`, so a test can pin their exact order (including the
+# binaries the fake saw at `start` time).
+rollback_seq() {
+	sed -n '/^run -d --name hindsight /,$p' "$1" |
+		grep -E '^(stop -t 60 hindsight|rm (-f )?hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation [0-9a-f]+)$' |
+		tr '\n' '|'
+}
+
+flow_test_recreate_success() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_a.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data dir"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+	mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM HINDSIGHT_MEMORY_LIMIT
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_IMAGE_ARCH=arm64
+		FAKE_MARKER="$tmp/started.marker"
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_MARKER HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+		recreate_run "$tmp"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "recreate(a): exits 0" "0" "$rc"
+	if log_before "stop -t 60 hindsight" "rename hindsight hindsight-prev" "$log" &&
+		log_before "rename hindsight hindsight-prev" "update --restart=no hindsight-prev" "$log" &&
+		log_before "update --restart=no hindsight-prev" "run -d --name hindsight " "$log"; then
+		pass "recreate(a): stop, rename, disable restart on the old one, then create"
+	else
+		fail "recreate(a): wrong docker call order: $(tr '\n' '|' <"$log")"
+	fi
+	if grep -q -E '^rm ' "$log"; then
+		fail "recreate(a): the previous container must be kept, not removed"
+	else
+		pass "recreate(a): the previous container is kept for rollback"
+	fi
+	assert_eq "recreate(a): the saved arm64 binaries were swapped in" "arm64" \
+		"$(elf_arch "$data/installation/18.1.0/bin/postgres")"
+	assert_eq "recreate(a): the amd64 binaries were parked" "amd64" \
+		"$(elf_arch "$data/installation.amd64/18.1.0/bin/postgres")"
+	case "$out" in
+	*"kept, stopped, as 'hindsight-prev'"*) pass "recreate(a): tells the operator where the rollback copy is" ;;
+	*) fail "recreate(a): expected the rollback copy to be named, got: $out" ;;
+	esac
+	case "$out" in
+	*"Recreated 'hindsight' (linux/arm64, memory 4g)."*) pass "recreate(a): the success line shows platform and memory" ;;
+	*) fail "recreate(a): expected platform and memory in the success line, got: $out" ;;
+	esac
+	case "$out" in
+	*"parked as '$data/installation.amd64'"*"installation.amd64"*) pass "recreate(a): names the parked binaries and how to swap them back" ;;
+	*) fail "recreate(a): expected the parked-binaries note, got: $out" ;;
+	esac
+	printf '%s\n' "$out" >"$tmp/out.txt"
+	if log_before "docker rm hindsight" "mv '$data/installation'" "$tmp/out.txt" &&
+		log_before "mv '$data/installation'" "docker rename hindsight-prev hindsight" "$tmp/out.txt"; then
+		pass "recreate(a): the manual rollback removes the new container, then swaps binaries, then restores the old one"
+	else
+		fail "recreate(a): expected rm before mv before rename in the note, got: $out"
+	fi
+
+	rm -rf "$tmp"
+}
+
+flow_test_recreate_refusals() {
+	# (b) a rollback copy already exists, (c) there is nothing to recreate,
+	# (d) there is no API key: each must refuse BEFORE changing anything.
+	for scenario in prev-exists no-container no-key; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_b.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+
+		out=$(
+			unset HINDSIGHT_PLATFORM HINDSIGHT_API_LLM_API_KEY HINDSIGHT_API_LLM_BASE_URL
+			FAKE_DAEMON_ARCH=aarch64
+			FAKE_HINDSIGHT_EXISTS=1
+			HINDSIGHT_API_LLM_API_KEY="test-key"
+			# (if, not case: a case pattern's `)` inside $( ) breaks bash 3.2 as /bin/sh)
+			if [ "$scenario" = prev-exists ]; then FAKE_PREV_EXISTS=1; fi
+			if [ "$scenario" = no-container ]; then FAKE_HINDSIGHT_EXISTS=0; fi
+			if [ "$scenario" = no-key ]; then unset HINDSIGHT_API_LLM_API_KEY; fi
+			export FAKE_DAEMON_ARCH FAKE_HINDSIGHT_EXISTS FAKE_PREV_EXISTS
+			[ -n "${HINDSIGHT_API_LLM_API_KEY:-}" ] && export HINDSIGHT_API_LLM_API_KEY
+			recreate_run "$tmp"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+		assert_eq "recreate(b): $scenario exits 1" "1" "$rc"
+		if log_has_mutation "$log"; then
+			fail "recreate(b): $scenario must not change any container: $(tr '\n' '|' <"$log")"
+		else
+			pass "recreate(b): $scenario changes nothing"
+		fi
+
+		rm -rf "$tmp"
+	done
+}
+
+flow_test_recreate_rolls_back() {
+	# (e) the new container never becomes healthy, (f) it comes up as the wrong
+	# architecture. Both must restore the original container and Postgres binaries.
+	for scenario in unhealthy wrong-arch; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_c.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+		data="$tmp/data"
+		mkelf "$data/installation/18.1.0/bin/postgres" amd64
+		mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+		out=$(
+			unset HINDSIGHT_PLATFORM
+			FAKE_HINDSIGHT_EXISTS=1
+			FAKE_DAEMON_ARCH=aarch64
+			FAKE_IMAGE_ARCH=arm64
+			HINDSIGHT_DATA_DIR="$data"
+			HINDSIGHT_API_LLM_API_KEY="test-key"
+			# "unhealthy" sets no FAKE_MARKER, so the new server never answers.
+			if [ "$scenario" = wrong-arch ]; then
+				FAKE_MARKER="$tmp/started.marker"
+				FAKE_IMAGE_ARCH=amd64
+				export FAKE_MARKER
+			fi
+			export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+			recreate_run "$tmp"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+		assert_eq "recreate(c): $scenario exits 1" "1" "$rc"
+		if log_before "run -d --name hindsight " "rename hindsight-prev hindsight" "$log" &&
+			log_before "rename hindsight-prev hindsight" "start hindsight" "$log"; then
+			pass "recreate(c): $scenario renames the old container back and starts it"
+		else
+			fail "recreate(c): $scenario did not roll back: $(tr '\n' '|' <"$log")"
+		fi
+		# 3e00 = amd64: the original binaries are back before the old one starts.
+		assert_eq "recreate(c): $scenario stops and removes the new one, restores the binaries, then renames back and starts" \
+			"stop -t 60 hindsight|rm hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation 3e00|" \
+			"$(rollback_seq "$log")"
+		if grep -q -E '^rm hindsight$' "$log"; then
+			pass "recreate(c): $scenario removes the failed new container"
+		else
+			fail "recreate(c): $scenario expected 'docker rm hindsight'"
+		fi
+		if log_has "update --restart=unless-stopped hindsight" "$log"; then
+			pass "recreate(c): $scenario restores the restart policy"
+		else
+			fail "recreate(c): $scenario expected the restart policy to be restored"
+		fi
+		assert_eq "recreate(c): $scenario restores the amd64 binaries" "amd64" \
+			"$(elf_arch "$data/installation/18.1.0/bin/postgres")"
+		assert_eq "recreate(c): $scenario restores the saved arm64 slot" "arm64" \
+			"$(elf_arch "$data/installation.arm64/18.1.0/bin/postgres")"
+		case "$out" in
+		*"rolling back"*) pass "recreate(c): $scenario says it is rolling back" ;;
+		*) fail "recreate(c): $scenario expected a 'rolling back' message, got: $out" ;;
+		esac
+
+		rm -rf "$tmp"
+	done
+}
+
+flow_test_recreate_interrupted_rolls_back() {
+	# (g) A signal during the wait (after the old container was renamed away)
+	# must roll back, exit 130, and never claim success. TERM is used rather
+	# than INT because a test runner may start us with SIGINT ignored, which
+	# cannot be trapped; the script installs the same handler for INT/TERM/HUP.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_g.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+	mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_IMAGE_ARCH=arm64
+		FAKE_CURL_SIGNAL=TERM
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_CURL_SIGNAL HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+		recreate_run "$tmp"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "recreate(g): an interrupt exits 130" "130" "$rc"
+	assert_eq "recreate(g): an interrupt stops and removes the new one, restores the binaries, then renames back and starts" \
+		"stop -t 60 hindsight|rm hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation 3e00|" \
+		"$(rollback_seq "$log")"
+	assert_eq "recreate(g): the amd64 binaries are back in place" "amd64" \
+		"$(elf_arch "$data/installation/18.1.0/bin/postgres")"
+	case "$out" in
+	*"Recreate interrupted"*) pass "recreate(g): says the recreate was interrupted" ;;
+	*) fail "recreate(g): expected 'Recreate interrupted', got: $out" ;;
+	esac
+	case "$out" in
+	*"Recreated '"*) fail "recreate(g): an interrupted recreate must not report success, got: $out" ;;
+	*) pass "recreate(g): no success message" ;;
+	esac
+
+	rm -rf "$tmp"
+}
+
+flow_test_recreate_second_signal_ignored() {
+	# (i) A second signal while the interrupt rollback is running must not start
+	# a nested rollback (it would remove the just-restored original container).
+	# The second signal is HUP (first is TERM): some shells never re-enter a
+	# handler for the signal it is already running, but do nest a different one.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_i.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+	mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_IMAGE_ARCH=arm64
+		FAKE_CURL_SIGNAL=TERM
+		FAKE_UPDATE_SIGNAL=HUP
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_CURL_SIGNAL FAKE_UPDATE_SIGNAL HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+		recreate_run "$tmp"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "recreate(i): a second signal still exits 130" "130" "$rc"
+	assert_eq "recreate(i): the rollback runs once and completes (no nested stop/rm after rename-back)" \
+		"stop -t 60 hindsight|rm hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation 3e00|" \
+		"$(rollback_seq "$log")"
+
+	rm -rf "$tmp"
+}
+
+flow_test_recreate_nonnumeric_wait() {
+	# (h) Values like "3m" or "08" (invalid arithmetic) must fall back to the
+	# default, not abort the shell after the new container is created, which
+	# would skip the rollback.
+	for badwait in 3m 08; do
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_h.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" arm64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_IMAGE_ARCH=arm64
+		FAKE_MARKER="$tmp/started.marker"
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_MARKER HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			HINDSIGHT_RECREATE_WAIT_SECONDS="$badwait" \
+			sh "$SCRIPT" recreate 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "recreate(h): wait '$badwait' still recreates (exit 0)" "0" "$rc"
+	if log_has "run -d --name hindsight " "$log"; then
+		pass "recreate(h): wait '$badwait': the new container was created"
+	else
+		fail "recreate(h): wait '$badwait': expected docker run, got: $out"
+	fi
+
+	rm -rf "$tmp"
+	done
+}
+
+flow_test_recreate_command_failures() {
+	# `docker stop` failing must abort before anything is renamed or created;
+	# `docker rename` failing must put the original container back to work.
+	for scenario in stop-fails rename-fails; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_e.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+
+		out=$(
+			unset HINDSIGHT_PLATFORM
+			FAKE_HINDSIGHT_EXISTS=1
+			FAKE_DAEMON_ARCH=aarch64
+			HINDSIGHT_API_LLM_API_KEY="test-key"
+			if [ "$scenario" = stop-fails ]; then FAKE_STOP_FAIL=1; fi
+			if [ "$scenario" = rename-fails ]; then FAKE_RENAME_FAIL=1; fi
+			export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH HINDSIGHT_API_LLM_API_KEY FAKE_STOP_FAIL FAKE_RENAME_FAIL
+			recreate_run "$tmp"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+		assert_eq "recreate(e): $scenario exits 1" "1" "$rc"
+		if grep -q -E '^run ' "$log"; then
+			fail "recreate(e): $scenario must not create a container"
+		else
+			pass "recreate(e): $scenario creates no container"
+		fi
+		if [ "$scenario" = stop-fails ]; then
+			if grep -q -E '^rename ' "$log"; then
+				fail "recreate(e): a failed stop must not be followed by a rename"
+			else
+				pass "recreate(e): a failed stop stops the whole recreate"
+			fi
+		elif log_has "start hindsight" "$log"; then
+			pass "recreate(e): a failed rename restarts the original container"
+		else
+			fail "recreate(e): a failed rename must restart the original container"
+		fi
+
+		rm -rf "$tmp"
+	done
+}
+
+flow_test_recreate_rollback_failures() {
+	# The rollback must check its own steps: (1) `docker run` failed, so there is
+	# no new container to remove (a normal rollback); (2) the new container cannot
+	# be removed; (3) the original binaries cannot be put back; (4) restarts on
+	# the rollback copy cannot be disabled.
+	for scenario in run-fails rm-fails undo-fails update-fails; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_f.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+		data="$tmp/data"
+		mkelf "$data/installation/18.1.0/bin/postgres" amd64
+		mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+		out=$(
+			unset HINDSIGHT_PLATFORM
+			FAKE_HINDSIGHT_EXISTS=1
+			FAKE_DAEMON_ARCH=aarch64
+			FAKE_IMAGE_ARCH=arm64
+			HINDSIGHT_DATA_DIR="$data"
+			HINDSIGHT_API_LLM_API_KEY="test-key"
+			# No FAKE_MARKER: a created container never becomes healthy.
+			if [ "$scenario" = run-fails ]; then FAKE_RUN_FAIL=1; fi
+			if [ "$scenario" = rm-fails ]; then FAKE_RM_FAIL=1; fi
+			if [ "$scenario" = undo-fails ]; then FAKE_RUN_MKDIR="$data/installation.arm64"; fi
+			if [ "$scenario" = update-fails ]; then FAKE_DISABLE_RESTART_FAIL=1; fi
+			export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+			export FAKE_RUN_FAIL FAKE_RM_FAIL FAKE_RUN_MKDIR FAKE_DISABLE_RESTART_FAIL
+			recreate_run "$tmp"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+		assert_eq "recreate(f): $scenario exits 1" "1" "$rc"
+
+		if [ "$scenario" = run-fails ]; then
+			assert_eq "recreate(f): run-fails still restores the original container and binaries" \
+				"stop -t 60 hindsight|rm hindsight|rm -f hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation 3e00|" \
+				"$(rollback_seq "$log")"
+			case "$out" in
+			*"original 'hindsight' container was restored"*) pass "recreate(f): run-fails says the original was restored" ;;
+			*) fail "recreate(f): run-fails expected a 'restored' message, got: $out" ;;
+			esac
+		elif [ "$scenario" = update-fails ]; then
+			if grep -q -E '^run ' "$log"; then
+				fail "recreate(f): update-fails must not create a container"
+			else
+				pass "recreate(f): update-fails creates no container"
+			fi
+			if log_before "update --restart=no hindsight-prev" "rename hindsight-prev hindsight" "$log" &&
+				log_has "start hindsight" "$log"; then
+				pass "recreate(f): update-fails renames the original back and starts it"
+			else
+				fail "recreate(f): update-fails did not roll back: $(tr '\n' '|' <"$log")"
+			fi
+		else
+			case "$out" in
+			*"rollback incomplete"*) pass "recreate(f): $scenario reports an incomplete rollback" ;;
+			*) fail "recreate(f): $scenario expected 'rollback incomplete', got: $out" ;;
+			esac
+			if grep -q -E '^start hindsight$' "$log"; then
+				fail "recreate(f): $scenario must not start the old container"
+			else
+				pass "recreate(f): $scenario does not start the old container"
+			fi
+			if [ "$scenario" = rm-fails ]; then
+				if grep -q -E '^rename hindsight-prev hindsight$' "$log"; then
+					fail "recreate(f): rm-fails must not rename the old container back"
+				else
+					pass "recreate(f): rm-fails leaves the old container as the rollback copy"
+				fi
+				assert_eq "recreate(f): rm-fails leaves the binaries alone while the new container may run" "amd64" \
+					"$(elf_arch "$data/installation.amd64/18.1.0/bin/postgres")"
+			fi
+		fi
+
+		rm -rf "$tmp"
+	done
+}
+
+flow_test_recreate_and_usage_edges() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_d.XXXXXX")
+
+	# No docker at all: an explicit recreate is an error (hooks soft-exit 0).
+	chmod +x "$SCRIPT" 2>/dev/null
+	out=$(
+		PATH="$tmp" HINDSIGHT_CONFIG_FILE="$tmp/none.env" "$SCRIPT" recreate 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+	assert_eq "recreate(d): no docker exits 1" "1" "$rc"
+	case "$out" in
+	*"Docker is not available"*) pass "recreate(d): no docker says so" ;;
+	*) fail "recreate(d): expected 'Docker is not available', got: $out" ;;
+	esac
+
+	# An unknown argument is a usage error, not a silent ensure.
+	out=$(
+		PATH="$tmp" HINDSIGHT_CONFIG_FILE="$tmp/none.env" "$SCRIPT" bogus 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+	assert_eq "usage: an unknown argument exits 2" "2" "$rc"
+
+	rm -rf "$tmp"
+}
+
+flow_test_recreate_failure_rollback_uninterruptible() {
+	# P1: a signal that arrives during the FAILURE-path rollback's `docker stop`
+	# must not kill the script mid-rollback. FAKE_STOP_SIGNAL fires on the second
+	# `docker stop` (the rollback's; the first is recreate's own clean stop).
+	for scenario in unhealthy update-fails; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_j.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+		data="$tmp/data"
+		mkelf "$data/installation/18.1.0/bin/postgres" amd64
+		mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+		out=$(
+			unset HINDSIGHT_PLATFORM
+			FAKE_HINDSIGHT_EXISTS=1
+			FAKE_DAEMON_ARCH=aarch64
+			FAKE_IMAGE_ARCH=arm64
+			FAKE_STOP_SIGNAL=TERM
+			HINDSIGHT_DATA_DIR="$data"
+			HINDSIGHT_API_LLM_API_KEY="test-key"
+			if [ "$scenario" = update-fails ]; then FAKE_DISABLE_RESTART_FAIL=1; fi
+			export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_STOP_SIGNAL HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+			export FAKE_DISABLE_RESTART_FAIL
+			recreate_run "$tmp"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+		assert_eq "recreate(j): $scenario: a signal during the rollback still ends in exit 1" "1" "$rc"
+		if [ "$scenario" = unhealthy ]; then
+			assert_eq "recreate(j): $scenario: the rollback runs to completion despite the signal" \
+				"stop -t 60 hindsight|rm hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation 3e00|" \
+				"$(rollback_seq "$log")"
+		elif log_before "rename hindsight-prev hindsight" "start hindsight" "$log"; then
+			pass "recreate(j): $scenario: the old container is renamed back and started despite the signal"
+		else
+			fail "recreate(j): $scenario: the rollback did not finish: $(tr '\n' '|' <"$log")"
+		fi
+		assert_eq "recreate(j): $scenario: the original binaries are in place" "amd64" \
+			"$(elf_arch "$data/installation/18.1.0/bin/postgres")"
+		case "$out" in
+		*"do not interrupt"*) pass "recreate(j): $scenario: warns the rollback may take a while" ;;
+		*) fail "recreate(j): $scenario: expected a do-not-interrupt notice, got: $out" ;;
+		esac
+
+		rm -rf "$tmp"
+	done
+}
+
+flow_test_missing_key_rm_failure_leaves_binaries() {
+	# P2: when the old container cannot be removed, the hook path must not move
+	# Postgres binaries (a container may still be using the data directory) and
+	# must not create anything.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_p.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data dir"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_MISSING_KEY=1 \
+			FAKE_RM_FAIL=1 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			HINDSIGHT_DATA_DIR="$data" \
+			HINDSIGHT_API_LLM_API_KEY="test-key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT" 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(p): a failed rm of the old container exits 1" "1" "$rc"
+	assert_eq "flow(p): the amd64 binaries are untouched" "amd64" \
+		"$(elf_arch "$data/installation/18.1.0/bin/postgres")"
+	if [ -e "$data/installation.amd64" ]; then
+		fail "flow(p): no installation.amd64 may be created while the old container exists"
+	else
+		pass "flow(p): nothing was parked"
+	fi
+	if grep -q -E '^run ' "$log"; then
+		fail "flow(p): docker run must not be called: $(tr '\n' '|' <"$log")"
+	else
+		pass "flow(p): no docker run"
+	fi
+	case "$out" in
+	*"could not remove the existing"*) pass "flow(p): says why it stopped" ;;
+	*) fail "flow(p): expected an explanation, got: $out" ;;
+	esac
+
+	rm -rf "$tmp"
+}
+
+flow_test_missing_key_ps_failure_fails_closed() {
+	# A failing `docker ps` after the rm must not read as "gone": no binary
+	# moves, no docker run.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_q.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_EXISTS=1 \
+			FAKE_MISSING_KEY=1 \
+			FAKE_PS_FAIL_AFTER_RM=1 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			HINDSIGHT_DATA_DIR="$data" \
+			HINDSIGHT_API_LLM_API_KEY="test-key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT" 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(q): a failing docker ps exits 1" "1" "$rc"
+	assert_eq "flow(q): the amd64 binaries are untouched" "amd64" \
+		"$(elf_arch "$data/installation/18.1.0/bin/postgres")"
+	if grep -q -E '^run ' "$log"; then
+		fail "flow(q): docker run must not be called"
+	else
+		pass "flow(q): no docker run"
+	fi
+
+	rm -rf "$tmp"
+}
+
+flow_test_recreate_reports_causes() {
+	# P3: an operator-run recreate says why it failed. (a) docker run's own
+	# error, (b) the new container's diagnosis and logs BEFORE the rollback,
+	# (c) a failed `docker start` after a failed rename, (d) the hook stays quiet.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_k.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" arm64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_RUN_FAIL=1
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_RUN_FAIL HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+		recreate_run "$tmp"
+	)
+	case "$out" in
+	*"docker run failed (rc=1): fake-run-error: port is already allocated"*) pass "recreate(k): shows docker run's own error" ;;
+	*) fail "recreate(k): expected docker run's error, got: $out" ;;
+	esac
+	rm -rf "$tmp"
+
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_k.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" arm64
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_IMAGE_ARCH=arm64
+		FAKE_STATE="exited 132 false"
+		FAKE_LOGS_OUT="fake-log-line-from-the-new-container"
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_STATE FAKE_LOGS_OUT HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+		recreate_run "$tmp"
+	)
+	printf '%s\n' "$out" >"$tmp/out.txt"
+	if log_before "The new 'hindsight' container failed:" "is not runnable" "$tmp/out.txt" &&
+		log_before "is not runnable (state: exit code 132)" "Recreate failed; rolling back" "$tmp/out.txt"; then
+		pass "recreate(k): the new container's diagnosis comes before the rollback"
+	else
+		fail "recreate(k): expected the diagnosis before the rollback, got: $out"
+	fi
+	if log_before "fake-log-line-from-the-new-container" "Recreate failed; rolling back" "$tmp/out.txt"; then
+		pass "recreate(k): the new container's log tail comes before the rollback"
+	else
+		fail "recreate(k): expected the log tail before the rollback, got: $out"
+	fi
+	assert_eq "recreate(k): the rollback sequence is unchanged" \
+		"stop -t 60 hindsight|rm hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation b700|" \
+		"$(rollback_seq "$log")"
+	rm -rf "$tmp"
+
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_k.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_RENAME_FAIL=1
+		FAKE_START_FAIL=1
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_RENAME_FAIL FAKE_START_FAIL HINDSIGHT_API_LLM_API_KEY
+		recreate_run "$tmp"
+	)
+	case "$out" in
+	*"'hindsight' is stopped; run: docker start hindsight"*) pass "recreate(k): a failed restart after a failed rename is reported" ;;
+	*) fail "recreate(k): expected the stopped-container error, got: $out" ;;
+	esac
+	rm -rf "$tmp"
+
+	# The hook path stays quiet about docker run (debug only).
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_k.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	out=$(
+		unset HINDSIGHT_PLATFORM HINDSIGHT_DEBUG
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			FAKE_RUN_FAIL=1 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			HINDSIGHT_DATA_DIR="$tmp/data" \
+			HINDSIGHT_API_LLM_API_KEY="test-key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT" 2>&1
+		echo "exit=$?"
+	)
+	case "$out" in
+	*"docker run failed"*) fail "recreate(k): the hook path must not print docker run errors, got: $out" ;;
+	*) pass "recreate(k): the hook path stays quiet about docker run" ;;
+	esac
+	rm -rf "$tmp"
+}
+
+flow_test_recreate_warns_on_ignored_settings() {
+	# P4: a rejected setting is reported (stderr Warning), not silently replaced.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_l.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" arm64
+
+	out=$(
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_IMAGE_ARCH=arm64
+		FAKE_MARKER="$tmp/started.marker"
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		HINDSIGHT_MEMORY_LIMIT=lots
+		HINDSIGHT_PLATFORM=linux/s390x
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_MARKER HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY HINDSIGHT_MEMORY_LIMIT HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			HINDSIGHT_RECREATE_WAIT_SECONDS=0 \
+			sh "$SCRIPT" recreate 2>&1
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "recreate(l): invalid settings do not stop the recreate" "0" "$rc"
+	case "$out" in
+	*"Warning: ignoring invalid HINDSIGHT_MEMORY_LIMIT 'lots'; using 4g instead"*) pass "recreate(l): warns about the memory limit" ;;
+	*) fail "recreate(l): expected a memory limit warning, got: $out" ;;
+	esac
+	case "$out" in
+	*"Warning: ignoring invalid HINDSIGHT_PLATFORM 'linux/s390x'; using linux/arm64 instead"*) pass "recreate(l): warns about the platform" ;;
+	*) fail "recreate(l): expected a platform warning, got: $out" ;;
+	esac
+	case "$out" in
+	*"Warning: ignoring invalid HINDSIGHT_RECREATE_WAIT_SECONDS '0'; waiting 180s instead"*) pass "recreate(l): a wait of 0 is rejected with a warning" ;;
+	*) fail "recreate(l): expected a wait warning, got: $out" ;;
+	esac
+	case "$out" in
+	*"Recreated 'hindsight' (linux/arm64, memory 4g)."*) pass "recreate(l): the success line shows the values actually used" ;;
+	*) fail "recreate(l): expected the used values in the success line, got: $out" ;;
+	esac
+	if grep -q -F "[--memory][4g]" "$log.args"; then
+		pass "recreate(l): docker run got the default memory limit"
+	else
+		fail "recreate(l): expected --memory 4g, got: $(cat "$log.args" 2>/dev/null)"
+	fi
+
+	rm -rf "$tmp"
+}
+
+flow_test_recreate_rollback_step_failures() {
+	# P6: (1) the rename back fails: error + manual steps, the old container is
+	# not started; (2) the final start fails: "restored but did not start".
+	for scenario in rename-back-fails start-fails; do
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_m.XXXXXX")
+		build_shims "$tmp"
+		log="$tmp/docker.log"
+		: >"$log"
+		data="$tmp/data"
+		mkelf "$data/installation/18.1.0/bin/postgres" amd64
+		mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+		out=$(
+			unset HINDSIGHT_PLATFORM
+			FAKE_HINDSIGHT_EXISTS=1
+			FAKE_DAEMON_ARCH=aarch64
+			FAKE_IMAGE_ARCH=arm64
+			HINDSIGHT_DATA_DIR="$data"
+			HINDSIGHT_API_LLM_API_KEY="test-key"
+			if [ "$scenario" = rename-back-fails ]; then FAKE_RENAME_BACK_FAIL=1; fi
+			if [ "$scenario" = start-fails ]; then FAKE_START_FAIL=1; fi
+			export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+			export FAKE_RENAME_BACK_FAIL FAKE_START_FAIL
+			recreate_run "$tmp"
+		)
+		rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+		assert_eq "recreate(m): $scenario exits 1" "1" "$rc"
+
+		if [ "$scenario" = rename-back-fails ]; then
+			case "$out" in
+			*"could not rename 'hindsight-prev' back to 'hindsight'"*) pass "recreate(m): rename-back-fails says so" ;;
+			*) fail "recreate(m): rename-back-fails expected an error, got: $out" ;;
+			esac
+			case "$out" in
+			*"  docker rename hindsight-prev hindsight"*"  docker start hindsight"*) pass "recreate(m): rename-back-fails prints the manual steps" ;;
+			*) fail "recreate(m): rename-back-fails expected manual steps, got: $out" ;;
+			esac
+			if grep -q -E '^start hindsight$' "$log"; then
+				fail "recreate(m): rename-back-fails must not start anything"
+			else
+				pass "recreate(m): rename-back-fails does not start a container"
+			fi
+		else
+			case "$out" in
+			*"was restored but did not start"*) pass "recreate(m): start-fails says it was restored but did not start" ;;
+			*) fail "recreate(m): start-fails expected the did-not-start error, got: $out" ;;
+			esac
+			if grep -q -E '^rename hindsight-prev hindsight$' "$log"; then
+				pass "recreate(m): start-fails got as far as the rename back"
+			else
+				fail "recreate(m): start-fails expected the rename back"
+			fi
+		fi
+
+		rm -rf "$tmp"
+	done
+}
+
+# ---------------------------------------------------------------------------
 
 echo "=== config parser tests ==="
 config_parser_tests
+
+echo "=== platform and memory-limit resolution ==="
+resolution_tests
+
+echo "=== installation guard ==="
+guard_tests
 
 echo "=== flow tests ==="
 flow_test_healthy_no_mutation
@@ -471,6 +2039,31 @@ flow_test_migration_noop_when_both_exist
 flow_test_local_provider_no_key
 flow_test_no_key_aborts_without_create
 flow_test_no_docker
+flow_test_create_flags
+flow_test_memory_limit_override
+flow_test_unknown_arch_omits_platform
+flow_test_create_parks_wrong_arch_installation
+flow_test_exec_failure_is_diagnosed_not_restarted
+flow_test_exec_failure_advice_depends_on_cause
+flow_test_drift_is_reported_only_in_debug
+flow_test_key_with_shell_metacharacters
+flow_test_missing_key_rm_failure_leaves_binaries
+flow_test_missing_key_ps_failure_fails_closed
+
+echo "=== recreate ==="
+flow_test_recreate_success
+flow_test_recreate_refusals
+flow_test_recreate_rolls_back
+flow_test_recreate_interrupted_rolls_back
+flow_test_recreate_second_signal_ignored
+flow_test_recreate_nonnumeric_wait
+flow_test_recreate_command_failures
+flow_test_recreate_rollback_failures
+flow_test_recreate_failure_rollback_uninterruptible
+flow_test_recreate_reports_causes
+flow_test_recreate_warns_on_ignored_settings
+flow_test_recreate_rollback_step_failures
+flow_test_recreate_and_usage_edges
 
 echo ""
 echo "=== summary: $PASS_COUNT passed, $FAIL_COUNT failed ==="
