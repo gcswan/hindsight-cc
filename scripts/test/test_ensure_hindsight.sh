@@ -12,6 +12,13 @@
 TEST_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 SCRIPT="$TEST_DIR/../ensure-hindsight.sh"
 
+# Never let a test touch a real data directory: point the script at a throwaway
+# one for the whole run (the script reads HINDSIGHT_DATA_DIR).
+TEST_DATA_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/eh_data.XXXXXX")
+HINDSIGHT_DATA_DIR="$TEST_DATA_ROOT/hindsight-data"
+export HINDSIGHT_DATA_DIR
+trap 'rm -rf "$TEST_DATA_ROOT"' EXIT
+
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -126,6 +133,13 @@ config_parser_tests() {
 #   FAKE_HINDSIGHT_EXISTS     docker ps reports new container when "1"
 #   FAKE_LOG                  file to which docker logs its argv
 #   FAKE_MARKER               file created by `docker run` (started marker)
+#   FAKE_DAEMON_ARCH          what `docker info` reports as the architecture
+#   FAKE_IMAGE_ARCH           what `docker image inspect` reports (default arm64)
+#   FAKE_STATE                `State.Status ExitCode Restarting` (default "exited 0 false")
+#   FAKE_PREV_EXISTS          docker ps reports the rollback container when "1"
+#   FAKE_RUN_KEY_FILE         file that receives the API key docker run inherited
+#   FAKE_STOP_FAIL            `docker stop` fails when "1"
+#   FAKE_RENAME_FAIL          `docker rename` fails when "1"
 build_shims() {
 	dir="$1"
 
@@ -135,6 +149,8 @@ echo "$@" >>"$FAKE_LOG"
 cmd="$1"
 case "$cmd" in
 info)
+	# `docker info --format '{{.Architecture}}'`: FAKE_DAEMON_ARCH, else silent.
+	[ -n "${FAKE_DAEMON_ARCH:-}" ] && echo "$FAKE_DAEMON_ARCH"
 	exit 0
 	;;
 ps)
@@ -147,12 +163,17 @@ ps)
 		name=^hindsight$)
 			[ "${FAKE_HINDSIGHT_EXISTS:-0}" = "1" ] && echo "hsid456"
 			;;
+		name=^hindsight-prev$)
+			[ "${FAKE_PREV_EXISTS:-0}" = "1" ] && echo "previd789"
+			;;
 		esac
 	done
 	exit 0
 	;;
 run)
-	# Simulate a started server.
+	# Record the API key docker would inherit from the caller's environment,
+	# then simulate a started server.
+	[ -n "${FAKE_RUN_KEY_FILE:-}" ] && printf '%s' "${HINDSIGHT_API_LLM_API_KEY:-}" >"$FAKE_RUN_KEY_FILE"
 	[ -n "${FAKE_MARKER:-}" ] && : >"$FAKE_MARKER"
 	exit 0
 	;;
@@ -161,14 +182,37 @@ start)
 	[ -n "${FAKE_MARKER:-}" ] && : >"$FAKE_MARKER"
 	exit 0
 	;;
+image)
+	# `docker image inspect -f '{{.Architecture}}' <id>`
+	echo "${FAKE_IMAGE_ARCH:-arm64}"
+	exit 0
+	;;
 inspect)
-	# Emit an EMPTY API key (the recreate path) when FAKE_MISSING_KEY=1,
-	# otherwise a present key (the docker-start path).
-	if [ "${FAKE_MISSING_KEY:-0}" = "1" ]; then
-		echo "HINDSIGHT_API_LLM_API_KEY="
-	else
-		echo "HINDSIGHT_API_LLM_API_KEY=present"
-	fi
+	case "$*" in
+	*"{{.Image}}"*)
+		echo "sha256:fakeimage"
+		;;
+	*"{{.State.Status}}"*)
+		echo "${FAKE_STATE:-exited 0 false}"
+		;;
+	*)
+		# Emit an EMPTY API key (the recreate path) when FAKE_MISSING_KEY=1,
+		# otherwise a present key (the docker-start path).
+		if [ "${FAKE_MISSING_KEY:-0}" = "1" ]; then
+			echo "HINDSIGHT_API_LLM_API_KEY="
+		else
+			echo "HINDSIGHT_API_LLM_API_KEY=present"
+		fi
+		;;
+	esac
+	exit 0
+	;;
+stop)
+	[ "${FAKE_STOP_FAIL:-0}" = "1" ] && exit 1
+	exit 0
+	;;
+rename)
+	[ "${FAKE_RENAME_FAIL:-0}" = "1" ] && exit 1
 	exit 0
 	;;
 *)
@@ -459,9 +503,95 @@ flow_test_no_docker() {
 }
 
 # ---------------------------------------------------------------------------
+# Container platform, resources, and recreate (see
+# docs/superpowers/specs/2026-10-08-hindsight-container-platform-design.md)
+# ---------------------------------------------------------------------------
+
+# platform_for DAEMON_ARCH [OVERRIDE]
+# Prints what resolve_platform picks for a fake Docker daemon architecture and an
+# optional HINDSIGHT_PLATFORM. Uses the global $tmp as the shim directory.
+platform_for() {
+	pf_arch="$1"
+	pf_override="${2:-}"
+	(
+		unset HINDSIGHT_PLATFORM
+		if [ -n "$pf_override" ]; then
+			HINDSIGHT_PLATFORM="$pf_override"
+			export HINDSIGHT_PLATFORM
+		fi
+		PATH="$tmp:$PATH"
+		FAKE_LOG="$tmp/docker.log"
+		FAKE_DAEMON_ARCH="$pf_arch"
+		export PATH FAKE_LOG FAKE_DAEMON_ARCH
+		resolve_platform
+		printf '%s' "$EFF_PLATFORM"
+	)
+}
+
+# limit_for [ENV_VALUE]
+# Prints what resolve_memory_limit picks for an optional HINDSIGHT_MEMORY_LIMIT.
+limit_for() {
+	lf_env="${1:-}"
+	(
+		unset HINDSIGHT_MEMORY_LIMIT
+		if [ -n "$lf_env" ]; then
+			HINDSIGHT_MEMORY_LIMIT="$lf_env"
+			export HINDSIGHT_MEMORY_LIMIT
+		fi
+		resolve_memory_limit
+		printf '%s' "$EFF_MEMORY_LIMIT"
+	)
+}
+
+resolution_tests() {
+	# shellcheck disable=SC1090
+	ENSURE_HINDSIGHT_LIB=1 . "$SCRIPT"
+
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_res.XXXXXX")
+	build_shims "$tmp"
+	: >"$tmp/docker.log"
+	CONFIG_FILE="$tmp/none.env"
+
+	assert_eq "platform: aarch64 daemon -> linux/arm64" "linux/arm64" "$(platform_for aarch64)"
+	assert_eq "platform: arm64 daemon -> linux/arm64" "linux/arm64" "$(platform_for arm64)"
+	assert_eq "platform: x86_64 daemon -> linux/amd64" "linux/amd64" "$(platform_for x86_64)"
+	assert_eq "platform: amd64 daemon -> linux/amd64" "linux/amd64" "$(platform_for amd64)"
+	assert_eq "platform: unknown daemon arch -> empty (no --platform)" "" "$(platform_for s390x)"
+	assert_eq "platform: env override beats daemon arch" "linux/amd64" "$(platform_for aarch64 linux/amd64)"
+	assert_eq "platform: invalid override is ignored" "linux/arm64" "$(platform_for aarch64 linux/s390x)"
+
+	printf 'HINDSIGHT_PLATFORM=linux/amd64\nHINDSIGHT_MEMORY_LIMIT=3g\n' >"$tmp/cfg.env"
+	CONFIG_FILE="$tmp/cfg.env"
+	assert_eq "config: HINDSIGHT_PLATFORM is a recognized key" "linux/amd64" "$(config_get HINDSIGHT_PLATFORM)"
+	assert_eq "platform: config.env override beats daemon arch" "linux/amd64" "$(platform_for aarch64)"
+	assert_eq "platform: env override beats config.env" "linux/arm64" "$(platform_for aarch64 linux/arm64)"
+	assert_eq "platform: an invalid env value does not hide a valid config.env value" "linux/amd64" "$(platform_for aarch64 linux/s390x)"
+	assert_eq "memory: config.env value used when env is unset" "3g" "$(limit_for)"
+	assert_eq "memory: env beats config.env" "6g" "$(limit_for 6g)"
+
+	printf 'HINDSIGHT_PLATFORM="linux/arm64"\nHINDSIGHT_MEMORY_LIMIT='"'"'2G'"'"'\n' >"$tmp/quoted.env"
+	CONFIG_FILE="$tmp/quoted.env"
+	assert_eq "platform: a quoted config.env value is accepted" "linux/arm64" "$(platform_for x86_64)"
+	assert_eq "memory: a quoted, uppercase-unit config.env value is accepted" "2G" "$(limit_for)"
+
+	CONFIG_FILE="$tmp/none.env"
+	assert_eq "memory: default is 4g" "4g" "$(limit_for)"
+	assert_eq "memory: 'none' disables the limit" "none" "$(limit_for none)"
+	assert_eq "memory: megabytes accepted" "4096m" "$(limit_for 4096m)"
+	assert_eq "memory: garbage falls back to the default" "4g" "$(limit_for garbage)"
+	assert_eq "memory: bad suffix falls back to the default" "4g" "$(limit_for 4x)"
+	assert_eq "memory: leading letter falls back to the default" "4g" "$(limit_for g4)"
+
+	rm -rf "$tmp"
+}
+
+# ---------------------------------------------------------------------------
 
 echo "=== config parser tests ==="
 config_parser_tests
+
+echo "=== platform and memory-limit resolution ==="
+resolution_tests
 
 echo "=== flow tests ==="
 flow_test_healthy_no_mutation

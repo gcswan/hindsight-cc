@@ -14,24 +14,43 @@ LEGACY_CONTAINER_NAME="hindsight-cc"
 HEALTH_URL="${HINDSIGHT_BASE_URL:-http://localhost:8888}/health"
 HINDSIGHT_IMAGE_DEFAULT="ghcr.io/vectorize-io/hindsight:0.8.6"
 CONFIG_FILE="${HINDSIGHT_CONFIG_FILE:-$HOME/.config/hindsight-cc/config.env}"
+# Host directory bind-mounted as the embedded Postgres (pg0) data directory.
+DATA_DIR="${HINDSIGHT_DATA_DIR:-$HOME/hindsight-data}"
 
 # Built-in defaults for LLM settings.
 DEFAULT_PROVIDER="openai"
 DEFAULT_MODEL="gpt-5-nano"
 
-# Effective (resolved) config values, populated by resolve_config().
+# Container resource defaults. 4g is double the 2 GB the Hindsight docs
+# recommend for the full image and well under a typical Docker Desktop VM.
+DEFAULT_MEMORY_LIMIT="4g"
+# Stable worker identity so tasks claimed by a previous container can be
+# recovered after a recreate (the container ID changes every time).
+WORKER_ID="hindsight-local"
+
+# Effective (resolved) config values, populated by resolve_*().
 EFF_PROVIDER=""
 EFF_MODEL=""
 EFF_API_KEY=""
 EFF_BASE_URL=""
+EFF_PLATFORM=""
+EFF_MEMORY_LIMIT=""
+
+# debug_enabled
+# Returns 0 when HINDSIGHT_DEBUG asks for verbose output.
+debug_enabled() {
+	case "${HINDSIGHT_DEBUG:-}" in
+	1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss]) return 0 ;;
+	esac
+	return 1
+}
 
 # Debug function - only outputs if HINDSIGHT_DEBUG is set
 debug() {
-	case "${HINDSIGHT_DEBUG:-}" in
-	1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss])
+	if debug_enabled; then
 		echo "[hindsight-cc:ensure-hindsight] $1" >&2
-		;;
-	esac
+	fi
+	return 0
 }
 
 # config_get KEY
@@ -40,13 +59,13 @@ debug() {
 # contain `=`), skips blank lines and `#` comments, trims whitespace around
 # the key, and strips ONE pair of matching surrounding single/double quotes
 # from the value. The value is otherwise kept literal (no escape handling, no
-# execution). Only the four HINDSIGHT_API_LLM_* keys are meaningful to callers.
+# execution). Only the keys listed below are meaningful to callers.
 config_get() {
 	cg_want="$1"
 
-	# Only the four HINDSIGHT_API_LLM_* keys are recognized; ignore anything else.
+	# Only these keys are recognized; ignore anything else.
 	case "$cg_want" in
-	HINDSIGHT_API_LLM_PROVIDER | HINDSIGHT_API_LLM_MODEL | HINDSIGHT_API_LLM_API_KEY | HINDSIGHT_API_LLM_BASE_URL) ;;
+	HINDSIGHT_API_LLM_PROVIDER | HINDSIGHT_API_LLM_MODEL | HINDSIGHT_API_LLM_API_KEY | HINDSIGHT_API_LLM_BASE_URL | HINDSIGHT_PLATFORM | HINDSIGHT_MEMORY_LIMIT) ;;
 	*) return 0 ;;
 	esac
 
@@ -115,6 +134,60 @@ resolve_config() {
 	# Optional; no default. Only passed through to the container when set.
 	EFF_BASE_URL="${HINDSIGHT_API_LLM_BASE_URL:-}"
 	[ -n "$EFF_BASE_URL" ] || EFF_BASE_URL=$(config_get HINDSIGHT_API_LLM_BASE_URL)
+}
+
+# valid_memory_limit VALUE
+# Accepts `none` or a Docker memory size: digits with an optional b/k/m/g suffix.
+valid_memory_limit() {
+	case "$1" in
+	none) return 0 ;;
+	'' | *[!0-9bBkKmMgG]* | [!0-9]*) return 1 ;;
+	esac
+	return 0
+}
+
+# resolve_memory_limit
+# EFF_MEMORY_LIMIT: env HINDSIGHT_MEMORY_LIMIT > config.env > default. `none`
+# disables the limit. An invalid value is ignored (debug log) in favor of the
+# default, so a typo can never stop the container from being created.
+resolve_memory_limit() {
+	EFF_MEMORY_LIMIT="${HINDSIGHT_MEMORY_LIMIT:-}"
+	[ -n "$EFF_MEMORY_LIMIT" ] || EFF_MEMORY_LIMIT=$(config_get HINDSIGHT_MEMORY_LIMIT)
+	[ -n "$EFF_MEMORY_LIMIT" ] || EFF_MEMORY_LIMIT="$DEFAULT_MEMORY_LIMIT"
+	if ! valid_memory_limit "$EFF_MEMORY_LIMIT"; then
+		debug "Ignoring invalid HINDSIGHT_MEMORY_LIMIT '$EFF_MEMORY_LIMIT'; using $DEFAULT_MEMORY_LIMIT"
+		EFF_MEMORY_LIMIT="$DEFAULT_MEMORY_LIMIT"
+	fi
+}
+
+# resolve_platform
+# EFF_PLATFORM is the Docker platform the container must run as:
+#   1. HINDSIGHT_PLATFORM (env, then config.env): the first value that is
+#      exactly linux/arm64 or linux/amd64. Any other value is ignored (debug log).
+#   2. Otherwise the Docker DAEMON's architecture (not `uname -m`, so a remote
+#      daemon or an Intel host is handled correctly).
+#   3. Otherwise empty: no --platform flag is passed (Docker's own default).
+# Passing --platform explicitly matters: without it Docker silently reuses
+# whichever architecture a local tag happens to point at, so a stale amd64 tag
+# on an arm64 host runs under emulation with only a discarded stderr warning.
+resolve_platform() {
+	for rp_candidate in "${HINDSIGHT_PLATFORM:-}" "$(config_get HINDSIGHT_PLATFORM)"; do
+		case "$rp_candidate" in
+		linux/arm64 | linux/amd64)
+			EFF_PLATFORM="$rp_candidate"
+			return 0
+			;;
+		'') ;;
+		*) debug "Ignoring invalid HINDSIGHT_PLATFORM '$rp_candidate'" ;;
+		esac
+	done
+
+	rp_arch=$(docker info --format '{{.Architecture}}' 2>/dev/null)
+	case "$rp_arch" in
+	aarch64 | arm64) EFF_PLATFORM="linux/arm64" ;;
+	x86_64 | amd64) EFF_PLATFORM="linux/amd64" ;;
+	*) EFF_PLATFORM="" ;;
+	esac
 }
 
 # require_api_key
