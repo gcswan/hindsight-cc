@@ -761,6 +761,162 @@ flow_test_key_with_shell_metacharacters() {
 	rm -rf "$tmp"
 }
 
+# mkelf FILE ARCH
+# Writes a 20-byte ELF header whose e_machine says ARCH (amd64|arm64); any other
+# ARCH writes a non-ELF file. Enough for elf_arch to classify.
+mkelf() {
+	mkdir -p "$(dirname "$1")"
+	case "$2" in
+	amd64) printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\003\000\076\000' >"$1" ;;
+	arm64) printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\003\000\267\000' >"$1" ;;
+	*) printf 'not an elf file' >"$1" ;;
+	esac
+}
+
+# guard_fresh: reset DATA_DIR and the recorded swap between guard scenarios.
+guard_fresh() {
+	rm -rf "$DATA_DIR"
+	mkdir -p "$DATA_DIR"
+	GUARD_SWAPPED=0
+	GUARD_HAVE=""
+	GUARD_WANT=""
+}
+
+# present PATH -> "present" or "absent"
+present() {
+	if [ -e "$1" ]; then echo present; else echo absent; fi
+}
+
+guard_tests() {
+	# shellcheck disable=SC1090
+	ENSURE_HINDSIGHT_LIB=1 . "$SCRIPT"
+
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_guard.XXXXXX")
+	# A space in the path must not break any of the moves.
+	DATA_DIR="$tmp/data dir"
+	pg="18.1.0/bin/postgres"
+
+	mkelf "$tmp/x86" amd64
+	mkelf "$tmp/arm" arm64
+	mkelf "$tmp/junk" other
+	assert_eq "elf_arch: x86-64 header" "amd64" "$(elf_arch "$tmp/x86")"
+	assert_eq "elf_arch: aarch64 header" "arm64" "$(elf_arch "$tmp/arm")"
+	assert_eq "elf_arch: non-ELF file" "unknown" "$(elf_arch "$tmp/junk")"
+	assert_eq "elf_arch: missing file" "unknown" "$(elf_arch "$tmp/nope")"
+	assert_eq "platform_arch: linux/arm64" "arm64" "$(platform_arch linux/arm64)"
+	assert_eq "platform_arch: linux/amd64" "amd64" "$(platform_arch linux/amd64)"
+	assert_eq "platform_arch: empty" "" "$(platform_arch "")"
+
+	# 1. Mismatch with no saved copy: park it, leave installation for pg0 to refill.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" amd64
+	guard_installation arm64
+	rc=$?
+	assert_eq "guard(1): mismatch returns 0" "0" "$rc"
+	assert_eq "guard(1): installation is moved aside" "absent" "$(present "$DATA_DIR/installation")"
+	assert_eq "guard(1): the parked copy is the amd64 one" "amd64" "$(elf_arch "$DATA_DIR/installation.amd64/$pg")"
+	assert_eq "guard(1): the swap is recorded" "1" "$GUARD_SWAPPED"
+	# pg0 downloads fresh binaries into installation; undo must keep them.
+	mkelf "$DATA_DIR/installation/$pg" arm64
+	undo_guard
+	rc=$?
+	assert_eq "guard(1): undo returns 0" "0" "$rc"
+	assert_eq "guard(1): undo restores the original amd64 installation" "amd64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+	assert_eq "guard(1): undo saves the downloaded arm64 copy" "arm64" "$(elf_arch "$DATA_DIR/installation.arm64/$pg")"
+	assert_eq "guard(1): undo clears the recorded swap" "0" "$GUARD_SWAPPED"
+
+	# 2. Mismatch with a saved matching copy: swap it in; undo swaps it back.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" amd64
+	mkelf "$DATA_DIR/installation.arm64/$pg" arm64
+	guard_installation arm64
+	rc=$?
+	assert_eq "guard(2): returns 0" "0" "$rc"
+	assert_eq "guard(2): the saved arm64 copy is now installation" "arm64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+	assert_eq "guard(2): the amd64 copy is parked" "amd64" "$(elf_arch "$DATA_DIR/installation.amd64/$pg")"
+	assert_eq "guard(2): the saved copy slot is consumed" "absent" "$(present "$DATA_DIR/installation.arm64")"
+	undo_guard
+	assert_eq "guard(2): undo puts amd64 back" "amd64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+	assert_eq "guard(2): undo puts arm64 back in its slot" "arm64" "$(elf_arch "$DATA_DIR/installation.arm64/$pg")"
+	assert_eq "guard(2): undo leaves no amd64 slot" "absent" "$(present "$DATA_DIR/installation.amd64")"
+
+	# 3. Already the right architecture: nothing moves.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" arm64
+	guard_installation arm64
+	assert_eq "guard(3): matching installation is untouched" "installation" "$(ls "$DATA_DIR")"
+	assert_eq "guard(3): no swap recorded" "0" "$GUARD_SWAPPED"
+
+	# 4. Unidentifiable binary: never touched.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" other
+	guard_installation arm64
+	assert_eq "guard(4): an unidentifiable binary is untouched" "installation" "$(ls "$DATA_DIR")"
+
+	# 5. Nothing installed yet: nothing to do.
+	guard_fresh
+	guard_installation arm64
+	rc=$?
+	assert_eq "guard(5): empty data dir returns 0" "0" "$rc"
+	assert_eq "guard(5): empty data dir stays empty" "" "$(ls "$DATA_DIR")"
+
+	# 6. The parking slot is taken: refuse, change nothing.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" amd64
+	mkelf "$DATA_DIR/installation.amd64/$pg" amd64
+	guard_installation arm64 2>/dev/null
+	rc=$?
+	assert_eq "guard(6): a taken parking slot returns 1" "1" "$rc"
+	assert_eq "guard(6): installation is left in place" "amd64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+	assert_eq "guard(6): no swap recorded" "0" "$GUARD_SWAPPED"
+
+	# 7. No architecture to compare against: nothing to do.
+	guard_fresh
+	mkelf "$DATA_DIR/installation/$pg" amd64
+	guard_installation ""
+	assert_eq "guard(7): an empty target architecture is a no-op" "amd64" "$(elf_arch "$DATA_DIR/installation/$pg")"
+
+	rm -rf "$tmp"
+}
+
+flow_test_create_parks_wrong_arch_installation() {
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_flow_k.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data dir"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+
+	# A new container on an arm64 daemon must not inherit amd64 Postgres binaries.
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		PATH="$tmp:$PATH" \
+			FAKE_LOG="$log" \
+			FAKE_MARKER="$tmp/started.marker" \
+			FAKE_HEALTH_OK=0 \
+			FAKE_HINDSIGHT_CC_EXISTS=0 \
+			FAKE_HINDSIGHT_EXISTS=0 \
+			FAKE_DAEMON_ARCH=aarch64 \
+			HINDSIGHT_DATA_DIR="$data" \
+			HINDSIGHT_API_LLM_API_KEY="test-key" \
+			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
+			sh "$SCRIPT"
+		echo "exit=$?"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "flow(k): create exits 0" "0" "$rc"
+	assert_eq "flow(k): the amd64 Postgres binaries were parked" "amd64" \
+		"$(elf_arch "$data/installation.amd64/18.1.0/bin/postgres")"
+	if log_has "-v $data:/home/hindsight/.pg0" "$log"; then
+		pass "flow(k): the data dir is the one bind-mounted"
+	else
+		fail "flow(k): expected the data dir bind mount on docker run"
+	fi
+
+	rm -rf "$tmp"
+}
+
 # ---------------------------------------------------------------------------
 
 echo "=== config parser tests ==="
@@ -768,6 +924,9 @@ config_parser_tests
 
 echo "=== platform and memory-limit resolution ==="
 resolution_tests
+
+echo "=== installation guard ==="
+guard_tests
 
 echo "=== flow tests ==="
 flow_test_healthy_no_mutation
@@ -780,6 +939,7 @@ flow_test_no_docker
 flow_test_create_flags
 flow_test_memory_limit_override
 flow_test_unknown_arch_omits_platform
+flow_test_create_parks_wrong_arch_installation
 flow_test_key_with_shell_metacharacters
 
 echo ""

@@ -36,6 +36,11 @@ EFF_BASE_URL=""
 EFF_PLATFORM=""
 EFF_MEMORY_LIMIT=""
 
+# Recorded by guard_installation so a failed recreate can undo the swap.
+GUARD_SWAPPED=0
+GUARD_HAVE=""
+GUARD_WANT=""
+
 # debug_enabled
 # Returns 0 when HINDSIGHT_DEBUG asks for verbose output.
 debug_enabled() {
@@ -160,6 +165,16 @@ resolve_memory_limit() {
 	fi
 }
 
+# platform_arch PLATFORM
+# Echoes the image architecture name (arm64|amd64) for a Docker platform string,
+# or nothing for anything else.
+platform_arch() {
+	case "$1" in
+	linux/arm64) echo arm64 ;;
+	linux/amd64) echo amd64 ;;
+	esac
+}
+
 # resolve_platform
 # EFF_PLATFORM is the Docker platform the container must run as:
 #   1. HINDSIGHT_PLATFORM (env, then config.env): the first value that is
@@ -215,12 +230,98 @@ container_missing_api_key() {
 	echo "$cmk_env" | grep -q '^HINDSIGHT_API_LLM_API_KEY=$'
 }
 
+# elf_arch FILE
+# Echoes arm64, amd64, or unknown from the ELF e_machine field (2 bytes at
+# offset 18, little-endian: 0x3e 0x00 = x86-64, 0xb7 0x00 = aarch64).
+elf_arch() {
+	ea_bytes=$(od -An -tx1 -j18 -N2 "$1" 2>/dev/null | tr -d ' \n')
+	case "$ea_bytes" in
+	b700) echo arm64 ;;
+	3e00) echo amd64 ;;
+	*) echo unknown ;;
+	esac
+}
+
+# find_pg_binary DIR
+# Echoes the first DIR/<version>/bin/postgres that exists, or nothing.
+find_pg_binary() {
+	for fpb_file in "$1"/*/bin/postgres; do
+		if [ -f "$fpb_file" ]; then
+			echo "$fpb_file"
+			return 0
+		fi
+	done
+	return 0
+}
+
+# guard_installation ARCH
+# The embedded Postgres binaries that pg0 downloads into DATA_DIR/installation
+# are architecture-specific. When they do not match ARCH (arm64|amd64), park
+# them as installation.<their-arch> (never deleting anything) and, if a copy
+# for ARCH was parked earlier, move that into place; otherwise leave
+# installation absent so pg0 downloads the right ones. Only call this when no
+# container is using DATA_DIR. Records the swap in GUARD_* for undo_guard.
+guard_installation() {
+	gi_want="$1"
+	[ -n "$gi_want" ] || return 0
+
+	gi_dir="$DATA_DIR/installation"
+	gi_bin=$(find_pg_binary "$gi_dir")
+	[ -n "$gi_bin" ] || return 0
+
+	gi_have=$(elf_arch "$gi_bin")
+	# Do not touch what cannot be identified, or what already matches.
+	[ "$gi_have" != "unknown" ] || return 0
+	[ "$gi_have" != "$gi_want" ] || return 0
+
+	gi_park="$DATA_DIR/installation.$gi_have"
+	if [ -e "$gi_park" ]; then
+		echo "Error: embedded Postgres binaries are $gi_have but $gi_want is needed, and $gi_park already exists; move one aside and retry" >&2
+		return 1
+	fi
+
+	debug "Parking $gi_have Postgres binaries as $gi_park (need $gi_want)"
+	mv "$gi_dir" "$gi_park" || return 1
+	if [ -d "$DATA_DIR/installation.$gi_want" ]; then
+		if ! mv "$DATA_DIR/installation.$gi_want" "$gi_dir"; then
+			mv "$gi_park" "$gi_dir"
+			return 1
+		fi
+	fi
+
+	GUARD_SWAPPED=1
+	GUARD_HAVE="$gi_have"
+	GUARD_WANT="$gi_want"
+	return 0
+}
+
+# undo_guard
+# Reverses the swap recorded by guard_installation. A no-op when none happened.
+undo_guard() {
+	[ "$GUARD_SWAPPED" = "1" ] || return 0
+
+	ug_dir="$DATA_DIR/installation"
+	if [ -e "$ug_dir" ]; then
+		if [ -e "$DATA_DIR/installation.$GUARD_WANT" ]; then
+			echo "Error: cannot undo the installation swap: $DATA_DIR/installation.$GUARD_WANT already exists" >&2
+			return 1
+		fi
+		mv "$ug_dir" "$DATA_DIR/installation.$GUARD_WANT" || return 1
+	fi
+	mv "$DATA_DIR/installation.$GUARD_HAVE" "$ug_dir" || return 1
+	GUARD_SWAPPED=0
+	return 0
+}
+
 create_container() {
 	debug "Creating Hindsight container"
 	mkdir -p "$DATA_DIR"
 
 	resolve_platform
 	resolve_memory_limit
+	if ! guard_installation "$(platform_arch "$EFF_PLATFORM")"; then
+		return 1
+	fi
 
 	HINDSIGHT_IMAGE="${HINDSIGHT_IMAGE:-$HINDSIGHT_IMAGE_DEFAULT}"
 	debug "Starting new container with image ${HINDSIGHT_IMAGE} (platform: ${EFF_PLATFORM:-docker default})"
