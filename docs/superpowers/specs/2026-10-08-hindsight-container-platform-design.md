@@ -137,9 +137,14 @@ then `docker image inspect -f '{{.Architecture}}'`) and `platform_drift`
   user, so a warning there is easy to miss.
 - **Not healthy, container exists:** if it has exited with 132 (SIGILL), 126, or
   127, or is restarting, do not run `docker start` in a loop. Print a one-line
-  diagnosis to stderr naming the exit code and the two remedies
-  (`HINDSIGHT_PLATFORM=linux/amd64 ensure-hindsight.sh recreate`, or file an
-  issue with the logs) and exit 1.
+  diagnosis to stderr and exit 1. The state includes the exit code (and the last
+  exit code for a restart loop) and whether Docker OOM-killed it, and the advice
+  follows the cause: an OOM kill says to raise the limit
+  (`HINDSIGHT_MEMORY_LIMIT=6g <script> recreate`, or `none`) and never advises
+  amd64 (that image uses more memory); an exec failure (132/126/127) or a
+  non-OOM crash loop points at `docker logs hindsight` and offers the amd64
+  emulation fallback (`HINDSIGHT_PLATFORM=linux/amd64 <script> recreate`) only
+  when the Docker daemon is arm64.
 
 ### D4. `ensure-hindsight.sh recreate` (explicit, never run by hooks)
 

@@ -289,16 +289,19 @@ guard_installation() {
 
 	debug "Parking $gi_have Postgres binaries as $gi_park (need $gi_want)"
 	mv "$gi_dir" "$gi_park" || return 1
+	# Record the swap as soon as the park succeeds, so a signal between the two
+	# moves still lets undo_guard put the parked binaries back.
+	GUARD_SWAPPED=1
+	GUARD_HAVE="$gi_have"
+	GUARD_WANT="$gi_want"
 	if [ -d "$DATA_DIR/installation.$gi_want" ]; then
 		if ! mv "$DATA_DIR/installation.$gi_want" "$gi_dir"; then
 			mv "$gi_park" "$gi_dir"
+			GUARD_SWAPPED=0
 			return 1
 		fi
 	fi
 
-	GUARD_SWAPPED=1
-	GUARD_HAVE="$gi_have"
-	GUARD_WANT="$gi_want"
 	return 0
 }
 
@@ -616,7 +619,7 @@ recreate_container() {
 	# rename, with no rollback), so validate it before anything is touched.
 	rc_wait="${HINDSIGHT_RECREATE_WAIT_SECONDS:-180}"
 	case "$rc_wait" in
-	'' | *[!0-9]*)
+	'' | *[!0-9]* | 0?*)
 		debug "Ignoring invalid HINDSIGHT_RECREATE_WAIT_SECONDS '$rc_wait', using 180"
 		rc_wait=180
 		;;
@@ -643,7 +646,7 @@ recreate_container() {
 		return 1
 	fi
 	# From here on the old container is parked: an interrupt must put it back.
-	trap 'echo "Recreate interrupted." >&2; recreate_rollback "$rc_prev"; exit 130' INT TERM HUP
+	trap 'trap "" INT TERM HUP; echo "Recreate interrupted." >&2; recreate_rollback "$rc_prev"; exit 130' INT TERM HUP
 	# A rollback copy that can restart on its own could end up running beside
 	# the new container on the same data directory, so this must succeed.
 	if ! docker update --restart=no "$rc_prev" >/dev/null 2>&1; then

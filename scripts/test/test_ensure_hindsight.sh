@@ -138,7 +138,8 @@ config_parser_tests() {
 #   FAKE_STATE                `State.Status ExitCode Restarting` (default "exited 0 false")
 #   FAKE_OOM                  `State.OOMKilled` appended to FAKE_STATE (default "false")
 #   FAKE_CURL_SIGNAL          curl sends this signal (e.g. TERM) to its parent, then fails
-#   FAKE_PREV_EXISTS         docker ps reports the rollback container when "1"
+#   FAKE_UPDATE_SIGNAL        `docker update --restart=unless-stopped` (the rollback) sends this signal to its parent
+#   FAKE_PREV_EXISTS        docker ps reports the rollback container when "1"
 #   FAKE_RUN_KEY_FILE         file that receives the API key docker run inherited
 #   FAKE_STOP_FAIL            `docker stop` fails when "1"
 #   FAKE_RENAME_FAIL          `docker rename` fails when "1"
@@ -217,6 +218,7 @@ rm)
 update)
 	case "$*" in
 	*"--restart=no"*) [ "${FAKE_DISABLE_RESTART_FAIL:-0}" = "1" ] && exit 1 ;;
+	*"--restart=unless-stopped"*) [ -n "${FAKE_UPDATE_SIGNAL:-}" ] && kill -"$FAKE_UPDATE_SIGNAL" "$PPID" ;;
 	esac
 	exit 0
 	;;
@@ -1381,9 +1383,45 @@ flow_test_recreate_interrupted_rolls_back() {
 	rm -rf "$tmp"
 }
 
+flow_test_recreate_second_signal_ignored() {
+	# (i) A second signal while the interrupt rollback is running must not start
+	# a nested rollback (it would remove the just-restored original container).
+	# The second signal is HUP (first is TERM): some shells never re-enter a
+	# handler for the signal it is already running, but do nest a different one.
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_i.XXXXXX")
+	build_shims "$tmp"
+	log="$tmp/docker.log"
+	: >"$log"
+	data="$tmp/data"
+	mkelf "$data/installation/18.1.0/bin/postgres" amd64
+	mkelf "$data/installation.arm64/18.1.0/bin/postgres" arm64
+
+	out=$(
+		unset HINDSIGHT_PLATFORM
+		FAKE_HINDSIGHT_EXISTS=1
+		FAKE_DAEMON_ARCH=aarch64
+		FAKE_IMAGE_ARCH=arm64
+		FAKE_CURL_SIGNAL=TERM
+		FAKE_UPDATE_SIGNAL=HUP
+		HINDSIGHT_DATA_DIR="$data"
+		HINDSIGHT_API_LLM_API_KEY="test-key"
+		export FAKE_HINDSIGHT_EXISTS FAKE_DAEMON_ARCH FAKE_IMAGE_ARCH FAKE_CURL_SIGNAL FAKE_UPDATE_SIGNAL HINDSIGHT_DATA_DIR HINDSIGHT_API_LLM_API_KEY
+		recreate_run "$tmp"
+	)
+	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
+
+	assert_eq "recreate(i): a second signal still exits 130" "130" "$rc"
+	assert_eq "recreate(i): the rollback runs once and completes (no nested stop/rm after rename-back)" \
+		"stop -t 60 hindsight|rm hindsight|rename hindsight-prev hindsight|update --restart=unless-stopped hindsight|start hindsight|fake-start-sees-installation 3e00|" \
+		"$(rollback_seq "$log")"
+
+	rm -rf "$tmp"
+}
+
 flow_test_recreate_nonnumeric_wait() {
-	# (h) A value like "3m" must fall back to the default, not abort the shell
-	# between the rename and the create.
+	# (h) Values like "3m" or "08" (invalid arithmetic) must fall back to the
+	# default, not abort the shell between the rename and the create.
+	for badwait in 3m 08; do
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/eh_rec_h.XXXXXX")
 	build_shims "$tmp"
 	log="$tmp/docker.log"
@@ -1403,20 +1441,21 @@ flow_test_recreate_nonnumeric_wait() {
 		PATH="$tmp:$PATH" \
 			FAKE_LOG="$log" \
 			HINDSIGHT_CONFIG_FILE="$tmp/none.env" \
-			HINDSIGHT_RECREATE_WAIT_SECONDS=3m \
+			HINDSIGHT_RECREATE_WAIT_SECONDS="$badwait" \
 			sh "$SCRIPT" recreate 2>&1
 		echo "exit=$?"
 	)
 	rc=$(printf '%s\n' "$out" | sed -n 's/^exit=//p')
 
-	assert_eq "recreate(h): a non-numeric wait still recreates (exit 0)" "0" "$rc"
+	assert_eq "recreate(h): wait '$badwait' still recreates (exit 0)" "0" "$rc"
 	if log_has "run -d --name hindsight " "$log"; then
-		pass "recreate(h): the new container was created"
+		pass "recreate(h): wait '$badwait': the new container was created"
 	else
-		fail "recreate(h): expected docker run, got: $out"
+		fail "recreate(h): wait '$badwait': expected docker run, got: $out"
 	fi
 
 	rm -rf "$tmp"
+	done
 }
 
 flow_test_recreate_command_failures() {
@@ -1600,6 +1639,7 @@ flow_test_recreate_success
 flow_test_recreate_refusals
 flow_test_recreate_rolls_back
 flow_test_recreate_interrupted_rolls_back
+flow_test_recreate_second_signal_ignored
 flow_test_recreate_nonnumeric_wait
 flow_test_recreate_command_failures
 flow_test_recreate_rollback_failures
