@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records tool results as messages with `role="user"`, so slicing the transcript
   at the last `role=="user"` entry started the slice *after* the final tool
   result on any turn that used tools, dropping the user's prompt and every
-  assistant message before the last one. Measured against the last turn of 435
-  local transcripts, about three quarters of the turn never reached the server.
+  assistant message before the last one. Measured against the last turn of 384
+  local transcripts, the old slice dropped the user's prompt in 83% of turns and
+  about three quarters of each turn's messages never reached the server.
   The slice now starts at the user's prompt: the last `role="user"` entry that
   carries no `tool_result` part and is not an `isMeta` entry.
 - `isMeta` entries (skill bodies loaded by the Skill tool, slash-command

@@ -415,17 +415,25 @@ class TestRetainTranscript:
     def test_transcript_of_only_tool_results_still_retains_the_turn(
         self, tmp_path, stub_server
     ):
-        """A transcript with no real prompt must not retain nothing.
+        """A transcript with no real prompt retains all of it, not just the tail.
 
-        A handful of real transcripts (resumed/compacted sessions) contain only
-        tool-result `user` messages. Preferring the real prompt must not turn
-        those into a silent no-op -- fall back to the last role=="user" entry.
+        A transcript can in principle contain only tool-result `user` messages.
+        Preferring the real prompt must not turn that into a silent no-op, and
+        falling back to the LAST tool result would reproduce the original
+        truncation: everything before the final tool result would be dropped.
         """
         base_url, _ = stub_server
         path = tmp_path / "transcript.jsonl"
         lines = [
             {"message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "t1", "content": "result"},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "the first finding"},
+                {"type": "tool_use", "id": "t2", "name": "Bash", "input": {}},
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t2", "content": "result"},
             ]}},
             {"message": {"role": "assistant", "content": [
                 {"type": "text", "text": "the salvaged answer"},
@@ -439,7 +447,139 @@ class TestRetainTranscript:
 
         match = _poll_received(lambda item: item[0].endswith("/memories"))
         assert match is not None, "nothing was retained for a tool-result-only turn"
-        assert "the salvaged answer" in match[1]["items"][0]["content"]
+        content = match[1]["items"][0]["content"]
+        assert "the salvaged answer" in content
+        assert "the first finding" in content, (
+            "the fallback kept only the tail after the last tool result"
+        )
+
+    def test_meta_user_message_is_not_taken_for_the_prompt(
+        self, tmp_path, stub_server
+    ):
+        """An `isMeta` user entry (e.g. a skill body) must not start the slice.
+
+        When the Skill tool runs, Claude Code appends the skill's text as a
+        role="user" message flagged isMeta, with no tool_result part. Taking it
+        for the prompt drops the user's question and the assistant's text
+        before the skill call, and retains the skill's instructions as if the
+        user had said them.
+        """
+        base_url, _ = stub_server
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            {"message": {"role": "user", "content": "please review the diff"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "loading the review skill"},
+                {"type": "tool_use", "id": "t1", "name": "Skill", "input": {}},
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "Launching skill"},
+            ]}},
+            {"isMeta": True, "message": {"role": "user", "content": [
+                {"type": "text", "text": "SKILL INSTRUCTIONS: step one, step two"},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "the diff looks fine"},
+            ]}},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(path)}, base_url
+        )
+        assert proc.returncode == 0
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None
+        content = match[1]["items"][0]["content"]
+        assert "please review the diff" in content, (
+            "the isMeta skill body was taken for the user's prompt"
+        )
+        assert "loading the review skill" in content
+        assert "the diff looks fine" in content
+        assert "SKILL INSTRUCTIONS" not in content, (
+            "the skill body was retained as if the user had said it"
+        )
+
+    def test_prompt_with_text_and_image_parts_is_the_prompt(
+        self, tmp_path, stub_server
+    ):
+        """A prompt given as a list of parts (text + image) is still the prompt."""
+        base_url, _ = stub_server
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            {"message": {"role": "user", "content": "an earlier question"}},
+            {"message": {"role": "assistant", "content": "an earlier answer"}},
+            {"message": {"role": "user", "content": [
+                {"type": "text", "text": "what is in this screenshot"},
+                {"type": "image", "source": {"type": "base64", "data": ""}},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "bytes"},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "a login form"},
+            ]}},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(path)}, base_url
+        )
+        assert proc.returncode == 0
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None
+        content = match[1]["items"][0]["content"]
+        assert "what is in this screenshot" in content
+        assert "a login form" in content
+        assert "an earlier question" not in content
+
+    def test_messages_with_no_text_are_not_retained_as_empty_lines(
+        self, tmp_path, stub_server
+    ):
+        """Tool results and tool-call-only messages carry no text parts.
+
+        They used to be emitted as bare `user: ` / `assistant: ` lines, which
+        on a tool-heavy turn made up most of the retained text.
+        """
+        base_url, _ = stub_server
+        transcript = self._write_tool_using_transcript(tmp_path)
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(transcript)}, base_url
+        )
+        assert proc.returncode == 0
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None
+        lines = match[1]["items"][0]["content"].splitlines()
+        assert lines == [
+            "user: why did the build break",
+            "assistant: checking the build log",
+            "assistant: the lockfile is stale",
+        ]
+
+    def test_turn_with_no_text_retains_nothing(self, tmp_path, stub_server):
+        """With every line skipped, no empty retain is sent to the server."""
+        base_url, _ = stub_server
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "result"},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t2", "name": "Bash", "input": {}},
+            ]}},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(path)}, base_url
+        )
+        assert proc.returncode == 0
+        assert _poll_received(
+            lambda item: item[0].endswith("/memories"), timeout=1.5
+        ) is None, "an empty transcript was retained"
 
     def test_entries_without_a_message_role_are_not_retained_as_unknown(
         self, tmp_path, stub_server

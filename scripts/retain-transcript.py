@@ -57,17 +57,19 @@ def main():
     # Claude Code records tool results as messages with role="user", so the last
     # role=="user" entry is usually a tool result rather than something the user
     # typed. Slicing there would drop the user's question and every assistant
-    # message before the final one. Only entries whose content carries no
-    # tool_result part count as a real prompt.
+    # message before the final one. isMeta entries (skill bodies, slash-command
+    # expansions, injected reminders) are role="user" too, and are not typed by
+    # the user either. Only entries that are neither count as a real prompt.
     last_user_idx = -1
-    last_any_user_idx = -1
+    first_any_user_idx = -1
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
         inner = msg.get("message", {}) if isinstance(msg, dict) else {}
         if not isinstance(inner, dict) or inner.get("role") != "user":
             continue
-        if last_any_user_idx == -1:
-            last_any_user_idx = i
+        first_any_user_idx = i
+        if msg.get("isMeta"):
+            continue
         content = inner.get("content", "")
         if isinstance(content, list) and any(
             isinstance(part, dict) and part.get("type") == "tool_result"
@@ -78,10 +80,11 @@ def main():
         break
 
     if last_user_idx == -1:
-        # Resumed/compacted transcripts can carry only tool-result user
-        # messages. Retaining the tail beats retaining nothing at all.
-        last_user_idx = last_any_user_idx
-        debug("No user prompt found; falling back to last user-role message")
+        # No prompt anywhere, so no turn boundary to slice at: the whole
+        # transcript is the turn. Slicing at the last tool result instead would
+        # keep only the final assistant message.
+        last_user_idx = first_any_user_idx
+        debug("No user prompt found; retaining from the first user-role message")
 
     if last_user_idx == -1:
         debug("No user message found in transcript")
@@ -99,11 +102,15 @@ def main():
         inner = msg.get("message", {})
         if not isinstance(inner, dict):
             continue
-        # Transcripts interleave non-message records (hook results, summaries).
-        # Skip anything without a role rather than emitting an `unknown:` line,
-        # which would only feed noise to the extraction LLM.
+        # Transcripts interleave non-message records (attachments, system
+        # records). Skip anything without a role rather than emitting an
+        # `unknown:` line, which would only feed noise to the extraction LLM.
         role = inner.get("role")
         if not role:
+            continue
+        # isMeta entries hold instructions (skill bodies, command expansions),
+        # not conversation; retaining them would attribute them to the user.
+        if msg.get("isMeta"):
             continue
         content = inner.get("content", "")
         if isinstance(content, list):
@@ -112,10 +119,18 @@ def main():
             ).strip()
         elif not isinstance(content, str):
             content = json.dumps(content, ensure_ascii=True)
+        content = content.strip()
+        # Tool results and tool-call-only assistant messages have no text parts;
+        # an empty `role: ` line is pure noise.
+        if not content:
+            continue
         lines.append(f"{role}: {content}")
 
     transcript = "\n".join(lines)
     debug(f"Formatted transcript: {len(transcript)} chars")
+    if not transcript:
+        debug("Turn has no text to retain")
+        return
 
     # `transcript` is fully built from stdin above before detaching; the child
     # must not touch stdin. retain_detached returns instantly and soft-fails.
