@@ -103,7 +103,9 @@ def main():
                 first_user_idx = i
             if not _is_tool_result(inner.get("content")) and _starts_turn(msg, prev_role):
                 turn_start_idx = i
-        prev_role = role
+        # An injected reminder between turns doesn't mean the assistant is busy.
+        if not (msg.get("isMeta") and _origin_kind(msg) is None):
+            prev_role = role
 
     if turn_start_idx == -1:
         # No turn start anywhere, so no boundary to slice at: the whole

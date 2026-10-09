@@ -537,6 +537,33 @@ class TestRetainTranscript:
             "the peer-started turn was not sliced at the peer message"
         )
 
+    def test_reminder_between_turns_does_not_hide_a_peer_turn_start(
+        self, tmp_path, stub_server
+    ):
+        """An injected isMeta reminder doesn't make an idle-time peer look mid-turn."""
+        base_url, _ = stub_server
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            {"origin": {"kind": "human"},
+             "message": {"role": "user", "content": "TURN1 human prompt"}},
+            {"message": {"role": "assistant", "content": "TURN1 reply"}},
+            {"isMeta": True,
+             "message": {"role": "user", "content": "an injected reminder"}},
+            {"isMeta": True, "origin": {"kind": "peer"},
+             "message": {"role": "user", "content": "the peer's report"}},
+            {"message": {"role": "assistant", "content": "TURN2 reply"}},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(path)}, base_url
+        )
+        assert proc.returncode == 0
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None
+        lines = match[1]["items"][0]["content"].splitlines()
+        assert lines == ["peer: the peer's report", "assistant: TURN2 reply"]
+
     def test_notification_arriving_mid_turn_is_not_the_turn_start(
         self, tmp_path, stub_server
     ):
