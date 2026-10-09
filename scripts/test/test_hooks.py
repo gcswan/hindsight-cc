@@ -500,6 +500,87 @@ class TestRetainTranscript:
             "the skill body was retained as if the user had said it"
         )
 
+    def test_peer_message_starting_a_turn_is_the_turn_start(
+        self, tmp_path, stub_server
+    ):
+        """A message from another agent that starts a turn bounds the slice.
+
+        Peer messages are role="user" + isMeta with origin.kind="peer". When one
+        arrives after the assistant finished, it starts a new turn. Skipping it
+        like a skill body would walk back to the previous human prompt and
+        retain the previous turn a second time.
+        """
+        base_url, _ = stub_server
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            {"origin": {"kind": "human"},
+             "message": {"role": "user", "content": "TURN1 human prompt"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "TURN1 reply"},
+            ]}},
+            {"isMeta": True, "origin": {"kind": "peer"},
+             "message": {"role": "user", "content": "the peer's report"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "TURN2 reply"},
+            ]}},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(path)}, base_url
+        )
+        assert proc.returncode == 0
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None
+        lines = match[1]["items"][0]["content"].splitlines()
+        assert lines == ["peer: the peer's report", "assistant: TURN2 reply"], (
+            "the peer-started turn was not sliced at the peer message"
+        )
+
+    def test_notification_arriving_mid_turn_is_not_the_turn_start(
+        self, tmp_path, stub_server
+    ):
+        """A task notification queued into a running turn doesn't start it.
+
+        Notifications are role="user" with origin.kind="task-notification".
+        One that arrives after a tool result belongs to the running turn, so the
+        slice still starts at the human prompt; it is labelled by its origin,
+        not attributed to the user.
+        """
+        base_url, _ = stub_server
+        path = tmp_path / "transcript.jsonl"
+        lines = [
+            {"origin": {"kind": "human"},
+             "message": {"role": "user", "content": "run the suite"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "starting the run"},
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+            ]}},
+            {"origin": {"kind": "task-notification"},
+             "message": {"role": "user", "content": "background job finished"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "all green"},
+            ]}},
+        ]
+        path.write_text("\n".join(json.dumps(line) for line in lines))
+        proc = _run_hook(
+            "retain-transcript.py", {"transcript_path": str(path)}, base_url
+        )
+        assert proc.returncode == 0
+
+        match = _poll_received(lambda item: item[0].endswith("/memories"))
+        assert match is not None
+        lines = match[1]["items"][0]["content"].splitlines()
+        assert lines == [
+            "user: run the suite",
+            "assistant: starting the run",
+            "task-notification: background job finished",
+            "assistant: all green",
+        ]
+
     def test_prompt_with_text_and_image_parts_is_the_prompt(
         self, tmp_path, stub_server
     ):
@@ -595,6 +676,10 @@ class TestRetainTranscript:
         lines = [
             {"message": {"role": "user", "content": "the real question"}},
             {"type": "system", "subtype": "hook_result"},
+            {"message": {"content": "a record with text but no role"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": None},
+            ]}},
             {"message": {"role": "assistant", "content": [
                 {"type": "text", "text": "the real answer"},
             ]}},
@@ -612,6 +697,8 @@ class TestRetainTranscript:
         assert "the real question" in content
         assert "the real answer" in content
         assert "unknown:" not in content
+        assert "no role" not in content
+        assert proc.stdout == ""
 
 
 def _load_script_module(filename, mod_name):

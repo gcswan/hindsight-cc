@@ -14,6 +14,36 @@ def debug(msg: str) -> None:
         print(f"[hindsight-cc:retain-transcript] {msg}", file=sys.stderr)
 
 
+def _is_tool_result(content) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(part, dict) and part.get("type") == "tool_result" for part in content
+    )
+
+
+def _origin_kind(msg: dict):
+    """The entry's origin.kind ("human", "peer", "task-notification", ...), or
+    None for transcripts written before Claude Code recorded an origin."""
+    origin = msg.get("origin")
+    return origin.get("kind") if isinstance(origin, dict) else None
+
+
+def _starts_turn(msg: dict, prev_role) -> bool:
+    """Whether a non-tool-result user entry begins a turn.
+
+    A human prompt always does. Messages from other agents, task notifications
+    and auto-continuations start a turn when they arrive with the assistant
+    idle (right after an assistant message, or first in the transcript); one
+    arriving after a tool result was queued into the running turn. Without an
+    origin, fall back to isMeta, which marks skill bodies and command expansions.
+    """
+    kind = _origin_kind(msg)
+    if kind == "human":
+        return True
+    if kind is not None:
+        return prev_role in (None, "assistant")
+    return not msg.get("isMeta")
+
+
 def main():
     debug("Starting")
     bank_id = get_bank_id(debug_callback=debug)
@@ -52,47 +82,42 @@ def main():
         debug("No messages in transcript")
         return
 
-    # Find the last user PROMPT index.
+    # Find where the last turn starts.
     #
-    # Claude Code records tool results as messages with role="user", so the last
-    # role=="user" entry is usually a tool result rather than something the user
-    # typed. Slicing there would drop the user's question and every assistant
-    # message before the final one. isMeta entries (skill bodies, slash-command
-    # expansions, injected reminders) are role="user" too, and are not typed by
-    # the user either. Only entries that are neither count as a real prompt.
-    last_user_idx = -1
-    first_any_user_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
+    # Claude Code records much more than the user's prompt as role="user": every
+    # tool result, isMeta entries (skill bodies, slash-command expansions,
+    # injected reminders), messages from other agents and task notifications.
+    # Slicing at the last role=="user" entry would usually land on a tool result
+    # and drop the user's question and every assistant message before the last.
+    # See _starts_turn for which entries begin a turn.
+    turn_start_idx = -1
+    first_user_idx = -1
+    prev_role = None
+    for i, msg in enumerate(messages):
         inner = msg.get("message", {}) if isinstance(msg, dict) else {}
-        if not isinstance(inner, dict) or inner.get("role") != "user":
+        if not isinstance(inner, dict) or not inner.get("role"):
             continue
-        first_any_user_idx = i
-        if msg.get("isMeta"):
-            continue
-        content = inner.get("content", "")
-        if isinstance(content, list) and any(
-            isinstance(part, dict) and part.get("type") == "tool_result"
-            for part in content
-        ):
-            continue
-        last_user_idx = i
-        break
+        role = inner["role"]
+        if role == "user":
+            if first_user_idx == -1:
+                first_user_idx = i
+            if not _is_tool_result(inner.get("content")) and _starts_turn(msg, prev_role):
+                turn_start_idx = i
+        prev_role = role
 
-    if last_user_idx == -1:
-        # No prompt anywhere, so no turn boundary to slice at: the whole
+    if turn_start_idx == -1:
+        # No turn start anywhere, so no boundary to slice at: the whole
         # transcript is the turn. Slicing at the last tool result instead would
         # keep only the final assistant message.
-        last_user_idx = first_any_user_idx
-        debug("No user prompt found; retaining from the first user-role message")
+        turn_start_idx = first_user_idx
+        debug("No turn start found; retaining from the first user-role message")
 
-    if last_user_idx == -1:
+    if turn_start_idx == -1:
         debug("No user message found in transcript")
         return
 
-    # Get messages from last user prompt onwards
-    recent_messages = messages[last_user_idx:]
-    debug(f"Processing {len(recent_messages)} messages from last user prompt")
+    recent_messages = messages[turn_start_idx:]
+    debug(f"Processing {len(recent_messages)} messages from the last turn start")
 
     # Format transcript section
     lines = []
@@ -108,14 +133,21 @@ def main():
         role = inner.get("role")
         if not role:
             continue
-        # isMeta entries hold instructions (skill bodies, command expansions),
-        # not conversation; retaining them would attribute them to the user.
-        if msg.get("isMeta"):
+        kind = _origin_kind(msg)
+        if role == "user" and kind not in (None, "human"):
+            # Peer messages and notifications are conversation, but not the
+            # user's: label them by where they came from.
+            role = kind
+        elif msg.get("isMeta"):
+            # Skill bodies and command expansions hold instructions, not
+            # conversation; retaining them would attribute them to the user.
             continue
         content = inner.get("content", "")
         if isinstance(content, list):
             content = "\n".join(
-                part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
+                part["text"]
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
             ).strip()
         elif not isinstance(content, str):
             content = json.dumps(content, ensure_ascii=True)

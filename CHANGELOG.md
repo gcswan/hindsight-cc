@@ -16,19 +16,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assistant message before the last one. Measured against the last turn of 384
   local transcripts, the old slice dropped the user's prompt in 83% of turns and
   about three quarters of each turn's messages never reached the server.
-  The slice now starts at the user's prompt: the last `role="user"` entry that
-  carries no `tool_result` part and is not an `isMeta` entry.
-- `isMeta` entries (skill bodies loaded by the Skill tool, slash-command
-  expansions, injected reminders) are `role="user"` messages too. They are no
-  longer taken for the user's prompt, and are left out of the retained text,
-  since they hold instructions rather than conversation.
-- When a transcript has no user prompt at all, the whole transcript is retained
+  The slice now starts at the user's prompt, or at whatever else started the
+  turn (see below).
+- Skill bodies, slash-command expansions and injected reminders are `isMeta`
+  entries with `role="user"` and no `tool_result` part. They are no longer taken
+  for the turn's start, and are left out of the retained text, since they hold
+  instructions rather than conversation.
+- Messages from other agents (`origin.kind="peer"`), task notifications and
+  auto-continuations start a turn when they arrive with the assistant idle, and
+  bound the slice there, so the previous turn is not retained again. One queued
+  into a running turn does not move the slice off the user's prompt. Either way
+  they are labelled by origin (`peer:`, `task-notification:`) instead of `user:`.
+- When a transcript has no turn start at all, the whole transcript is retained
   from its first user-role entry, instead of only the tail after the last tool
   result.
 - Transcript entries with no `message.role` (attachments, system records) were
   emitted as empty `unknown:` lines, and tool results and tool-call-only
   assistant messages as empty `user:` / `assistant:` lines, feeding noise to the
   extraction LLM. Lines with no text are now skipped.
+- A text part whose `text` was not a string (e.g. `null`) raised `TypeError` and
+  crashed the Stop hook. Such parts are now ignored.
 
 ## [2.1.0] - 2026-10-08
 
