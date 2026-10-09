@@ -74,7 +74,7 @@ All scripts follow a pattern of silently failing if Hindsight is unavailable. Se
 - `scripts/hs-python.sh` - POSIX-sh interpreter shim that the Python hooks are launched through; probes candidate interpreters (preferring fast, direct system paths), execs the first that imports the stdlib the hooks need, and soft-fails to a silent no-op if none work
 - `scripts/retain-prompt.py` - Stores user prompts via `hindsight_api.retain_detached()`
 - `scripts/inject-memories.py` - Queries and injects relevant memories via `hindsight_api.recall()`
-- `scripts/retain-transcript.py` - Stores conversation transcript segments from the last user message onwards
+- `scripts/retain-transcript.py` - Stores the last turn of the transcript, from the user's last prompt onwards (tool results and `isMeta` entries are `role="user"` too, so they don't count as the prompt)
 - `scripts/reflect.py` - Backs the `/hindsight-cc:reflect` command (AI-assisted decision support)
 - `scripts/search-memories.py` - Manual search utility for testing
 - `scripts/get-status.py` - Status checking utility
